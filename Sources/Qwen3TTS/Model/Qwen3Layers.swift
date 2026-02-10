@@ -5,7 +5,7 @@ import MLXRandom
 
 // MARK: - RMSNorm
 
-class Qwen3RMSNorm: Module {
+nonisolated class Qwen3RMSNorm: Module {
     let weight: MLXArray
     let eps: Float
 
@@ -27,7 +27,7 @@ class Qwen3RMSNorm: Module {
 
 // MARK: - Rotary Embedding
 
-class Qwen3RotaryEmbedding: Module {
+nonisolated class Qwen3RotaryEmbedding: Module {
     let dim: Int
     let maxPositionEmbeddings: Int
     let base: Float
@@ -124,7 +124,7 @@ func trimKVCache(_ cache: [KVCache], maxWindow: Int) -> [KVCache] {
 
 // MARK: - Attention
 
-class Qwen3Attention: Module {
+nonisolated class Qwen3Attention: Module {
     let numHeads: Int
     let numKVHeads: Int
     let headDim: Int
@@ -219,7 +219,7 @@ class Qwen3Attention: Module {
 
 // MARK: - MLP
 
-class Qwen3MLP: Module {
+nonisolated class Qwen3MLP: Module {
     let gate_proj: Linear
     let up_proj: Linear
     let down_proj: Linear
@@ -238,7 +238,7 @@ class Qwen3MLP: Module {
 
 // MARK: - Decoder Layer
 
-class Qwen3DecoderLayer: Module {
+nonisolated class Qwen3DecoderLayer: Module {
     let self_attn: Qwen3Attention
     let mlp: Qwen3MLP
     let input_layernorm: Qwen3RMSNorm
@@ -262,7 +262,7 @@ class Qwen3DecoderLayer: Module {
 
 // MARK: - Text Projection
 
-public class Qwen3TextProjection: Module {
+nonisolated public class Qwen3TextProjection: Module {
     let linear_fc1: Linear
     let linear_fc2: Linear
 

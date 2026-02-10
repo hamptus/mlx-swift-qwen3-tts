@@ -5,7 +5,7 @@ import MLXRandom
 
 // MARK: - Qwen3 Talker Model
 
-public class Qwen3Talker: Module {
+nonisolated public class Qwen3Talker: Module {
     public let config: Qwen3TTSConfig
     public let codec_embedding: Embedding
     public let text_embedding: Embedding

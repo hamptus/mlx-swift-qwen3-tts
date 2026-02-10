@@ -234,7 +234,7 @@ private func reflectPad1d(_ x: MLXArray, pad: Int) -> MLXArray {
     return x[0..., MLXArray(indices), 0...]
 }
 
-public class TimeDelayNetBlock: Module {
+nonisolated public class TimeDelayNetBlock: Module {
     public let conv: Conv1d
     private let padAmount: Int
 
@@ -260,7 +260,7 @@ public class TimeDelayNetBlock: Module {
     }
 }
 
-public class Res2NetBlock: Module {
+nonisolated public class Res2NetBlock: Module {
     public let blocks: [TimeDelayNetBlock]
     private let scale: Int
 
@@ -304,7 +304,7 @@ public class Res2NetBlock: Module {
     }
 }
 
-public class SqueezeExcitationBlock: Module {
+nonisolated public class SqueezeExcitationBlock: Module {
     public let conv1: Conv1d
     public let conv2: Conv1d
 
@@ -324,7 +324,7 @@ public class SqueezeExcitationBlock: Module {
     }
 }
 
-public class SqueezeExcitationRes2NetBlock: Module {
+nonisolated public class SqueezeExcitationRes2NetBlock: Module {
     public let tdnn1: TimeDelayNetBlock
     public let res2net_block: Res2NetBlock
     public let tdnn2: TimeDelayNetBlock
@@ -355,7 +355,7 @@ public class SqueezeExcitationRes2NetBlock: Module {
     }
 }
 
-public class AttentiveStatisticsPooling: Module {
+nonisolated public class AttentiveStatisticsPooling: Module {
     public let tdnn: TimeDelayNetBlock
     public let conv: Conv1d
     private let eps: Float = 1e-12
@@ -420,7 +420,7 @@ public struct SpeakerEncoderConfig: Sendable {
 
 // MARK: - Speaker Encoder
 
-public class SpeakerEncoder: Module {
+nonisolated public class SpeakerEncoder: Module {
     public let config: SpeakerEncoderConfig
 
     public let blocks: [Module]

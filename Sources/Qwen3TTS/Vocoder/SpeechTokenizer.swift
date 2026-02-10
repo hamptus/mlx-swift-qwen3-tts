@@ -6,6 +6,39 @@ import MLXFast
 
 // MARK: - Configuration
 
+public struct Qwen3TTSTokenizerEncoderConfig: Codable, Sendable {
+    public var audio_channels: Int = 1
+    public var codebook_dim: Int = 256
+    public var codebook_size: Int = 2048
+    public var compress: Int = 2
+    public var dilation_growth_rate: Int = 2
+    public var hidden_size: Int = 512
+    public var intermediate_size: Int = 2048
+    public var kernel_size: Int = 7
+    public var last_kernel_size: Int = 3
+    public var num_filters: Int = 64
+    public var num_hidden_layers: Int = 8
+    public var num_residual_layers: Int = 1
+    public var num_quantizers: Int = 32
+    public var num_semantic_quantizers: Int = 1
+    public var residual_kernel_size: Int = 3
+    public var upsampling_ratios: [Int] = [8, 6, 5, 4]
+    public var head_dim: Int = 64
+    public var num_attention_heads: Int = 8
+    public var num_key_value_heads: Int = 8
+    public var norm_eps: Float = 1e-5
+    public var rope_theta: Float = 10000.0
+    public var max_position_embeddings: Int = 8000
+    public var layer_scale_initial_scale: Float = 0.01
+    public var vector_quantization_hidden_dimension: Int = 256
+    public var quantization: QuantizationConfig?
+    public init() {}
+
+    public var quantizationSettings: QuantizationSettings {
+        QuantizationSettings(from: quantization)
+    }
+}
+
 public struct Qwen3TTSTokenizerDecoderConfig: Codable, Sendable {
     public var attention_bias: Bool = false
     public var attention_dropout: Float = 0.0
@@ -42,6 +75,7 @@ public struct Qwen3TTSTokenizerDecoderConfig: Codable, Sendable {
 
 public struct Qwen3TTSTokenizerConfig: Codable, Sendable {
     public var decoder_config: Qwen3TTSTokenizerDecoderConfig?
+    public var encoder_config: Qwen3TTSTokenizerEncoderConfig?
     public var encoder_valid_num_quantizers: Int = 16
     public var input_sample_rate: Int = 24000
     public var output_sample_rate: Int = 24000
@@ -55,7 +89,7 @@ public struct Qwen3TTSTokenizerConfig: Codable, Sendable {
 
 // MARK: - SnakeBeta Activation
 
-public class SnakeBeta: Module, UnaryLayer {
+nonisolated public class SnakeBeta: Module, UnaryLayer {
     let channels: Int
     var alpha: MLXArray
     var beta: MLXArray
@@ -77,7 +111,7 @@ public class SnakeBeta: Module, UnaryLayer {
 
 // MARK: - CausalConv1d
 
-public class CausalConv1d: Module {
+nonisolated public class CausalConv1d: Module {
     let conv: Conv1d
     let groups: Int
     let inChannels: Int
@@ -137,7 +171,7 @@ public class CausalConv1d: Module {
 
 // MARK: - CausalTransposeConv1d
 
-public class CausalTransposeConv1d: Module {
+nonisolated public class CausalTransposeConv1d: Module {
     let conv: ConvTransposed1d
     let trimRight: Int
 
@@ -171,7 +205,7 @@ public class CausalTransposeConv1d: Module {
 
 // MARK: - ConvNeXtBlock
 
-public class ConvNeXtBlock: Module {
+nonisolated public class ConvNeXtBlock: Module {
     let dwconv: CausalConv1d
     let norm: LayerNorm
     let pwconv1: Linear
@@ -203,7 +237,7 @@ public class ConvNeXtBlock: Module {
 
 // MARK: - DecoderRMSNorm
 
-public class DecoderRMSNorm: Module, UnaryLayer {
+nonisolated public class DecoderRMSNorm: Module, UnaryLayer {
     var weight: MLXArray
     let eps: Float
 
@@ -223,7 +257,7 @@ public class DecoderRMSNorm: Module, UnaryLayer {
 
 // MARK: - LayerScale
 
-public class LayerScale: Module, UnaryLayer {
+nonisolated public class LayerScale: Module, UnaryLayer {
     var scale: MLXArray
 
     public init(channels: Int, initialScale: Float = 0.01) {
@@ -238,7 +272,7 @@ public class LayerScale: Module, UnaryLayer {
 
 // MARK: - DecoderRotaryEmbedding
 
-public class DecoderRotaryEmbedding: Module {
+nonisolated public class DecoderRotaryEmbedding: Module {
     let dim: Int
     let maxPositionEmbeddings: Int
     let base: Float
@@ -284,7 +318,7 @@ func applyRotaryPosEmb(q: MLXArray, k: MLXArray, cos: MLXArray, sin: MLXArray) -
 
 // MARK: - DecoderAttention
 
-public class DecoderAttention: Module {
+nonisolated public class DecoderAttention: Module {
     let config: Qwen3TTSTokenizerDecoderConfig
     let layerIdx: Int
     let headDim: Int
@@ -342,7 +376,7 @@ public class DecoderAttention: Module {
 
 // MARK: - DecoderMLP
 
-public class DecoderMLP: Module {
+nonisolated public class DecoderMLP: Module {
     let gateProj: Linear
     let upProj: Linear
     let downProj: Linear
@@ -362,7 +396,7 @@ public class DecoderMLP: Module {
 
 // MARK: - DecoderTransformerLayer
 
-public class DecoderTransformerLayer: Module {
+nonisolated public class DecoderTransformerLayer: Module {
     let selfAttn: DecoderAttention
     let mlp: DecoderMLP
     let inputLayernorm: DecoderRMSNorm
@@ -402,7 +436,7 @@ public class DecoderTransformerLayer: Module {
 
 // MARK: - DecoderTransformer
 
-public class DecoderTransformer: Module {
+nonisolated public class DecoderTransformer: Module {
     let config: Qwen3TTSTokenizerDecoderConfig
     let layers: [DecoderTransformerLayer]
     let norm: DecoderRMSNorm
@@ -455,7 +489,7 @@ public class DecoderTransformer: Module {
 
 // MARK: - EuclideanCodebook
 
-public class EuclideanCodebook: Module {
+nonisolated public class EuclideanCodebook: Module {
     let dim: Int
     let codebookSize: Int
     let embed: Embedding
@@ -470,11 +504,24 @@ public class EuclideanCodebook: Module {
     public func decode(_ codes: MLXArray) -> MLXArray {
         return embed(codes)
     }
+
+    /// Encode vectors to nearest codebook indices via L2 distance.
+    /// - Parameter x: Input tensor [B, T, dim]
+    /// - Returns: Indices tensor [B, T] of Int32
+    public func encode(_ x: MLXArray) -> MLXArray {
+        let embedWeight = embed.weight  // [codebookSize, dim]
+        // L2 distance: ||x - e||^2 = ||x||^2 - 2*x·e + ||e||^2
+        let xSq = sum(x * x, axis: -1, keepDims: true)               // [B, T, 1]
+        let eSq = sum(embedWeight * embedWeight, axis: -1, keepDims: false)  // [codebookSize]
+        let dot = matmul(x, embedWeight.transposed(0, 1))             // [B, T, codebookSize]
+        let dist = xSq - 2 * dot + eSq  // broadcast eSq to [B, T, codebookSize]
+        return argMin(dist, axis: -1).asType(.int32)                  // [B, T]
+    }
 }
 
 // MARK: - VectorQuantization
 
-public class VectorQuantization: Module {
+nonisolated public class VectorQuantization: Module {
     let projectOut: Linear?
     let codebook: EuclideanCodebook
     let codebookSize: Int
@@ -506,7 +553,7 @@ public class VectorQuantization: Module {
 
 // MARK: - ResidualVectorQuantization
 
-public class ResidualVectorQuantization: Module {
+nonisolated public class ResidualVectorQuantization: Module {
     let layers: [VectorQuantization]
 
     public init(numQuantizers: Int, dim: Int, codebookSize: Int, codebookDim: Int? = nil, quantization: QuantizationSettings = .fullPrecision) {
@@ -537,7 +584,7 @@ public class ResidualVectorQuantization: Module {
 
 // MARK: - ResidualVectorQuantizer
 
-public class ResidualVectorQuantizer: Module {
+nonisolated public class ResidualVectorQuantizer: Module {
     let nQ: Int
     let dimension: Int
     let inputDimension: Int
@@ -594,7 +641,7 @@ public class ResidualVectorQuantizer: Module {
 
 // MARK: - SplitResidualVectorQuantizer
 
-public class SplitResidualVectorQuantizer: Module {
+nonisolated public class SplitResidualVectorQuantizer: Module {
     let nQSemantic: Int
     let nQAcoustic: Int
 
@@ -646,7 +693,7 @@ public class SplitResidualVectorQuantizer: Module {
 
 // MARK: - Decoder Components
 
-public class DecoderResidualUnit: Module {
+nonisolated public class DecoderResidualUnit: Module {
     let act1: SnakeBeta
     let conv1: CausalConv1d
     let act2: SnakeBeta
@@ -670,7 +717,7 @@ public class DecoderResidualUnit: Module {
     }
 }
 
-public class DecoderBlockUpsample: Module {
+nonisolated public class DecoderBlockUpsample: Module {
     let conv: ConvTransposed1d
     let trimRight: Int
 
@@ -703,7 +750,7 @@ public class DecoderBlockUpsample: Module {
     }
 }
 
-public class DecoderBlock: Module {
+nonisolated public class DecoderBlock: Module {
     let block: [Module]
 
     public init(config: Qwen3TTSTokenizerDecoderConfig, layerIdx: Int) {
@@ -736,7 +783,7 @@ public class DecoderBlock: Module {
     }
 }
 
-public class DecoderInitialConv: Module {
+nonisolated public class DecoderInitialConv: Module {
     let conv: Conv1d
     let kernelSize: Int
 
@@ -755,7 +802,7 @@ public class DecoderInitialConv: Module {
     }
 }
 
-public class DecoderOutputSnake: Module, UnaryLayer {
+nonisolated public class DecoderOutputSnake: Module, UnaryLayer {
     var alpha: MLXArray
     var beta: MLXArray
     let eps: Float = 1e-9
@@ -773,7 +820,7 @@ public class DecoderOutputSnake: Module, UnaryLayer {
     }
 }
 
-public class DecoderOutputConv: Module {
+nonisolated public class DecoderOutputConv: Module {
     let conv: Conv1d
     let kernelSize: Int
 
@@ -794,7 +841,7 @@ public class DecoderOutputConv: Module {
 
 // MARK: - Qwen3TTSSpeechTokenizerDecoder
 
-public class Qwen3TTSSpeechTokenizerDecoder: Module {
+nonisolated public class Qwen3TTSSpeechTokenizerDecoder: Module {
     let config: Qwen3TTSTokenizerDecoderConfig
     let totalUpsample: Int
 
@@ -942,7 +989,7 @@ public class Qwen3TTSSpeechTokenizerDecoder: Module {
 
 // MARK: - Qwen3TTSSpeechTokenizer
 
-public class Qwen3TTSSpeechTokenizer: Module {
+nonisolated public class Qwen3TTSSpeechTokenizer: Module {
     let config: Qwen3TTSTokenizerConfig
     let encoderValidNumQuantizers: Int
     let inputSampleRate: Int
