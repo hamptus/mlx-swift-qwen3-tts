@@ -198,13 +198,17 @@ public class Qwen3CodePredictor: Module {
 
         var newCaches: [KVCache] = []
         for (i, layer) in layers.enumerated() {
-            let layerCache = cache?[i]
+            let layerCache: KVCache? = (cache != nil && i < cache!.count) ? cache![i] : nil
             let (out, c) = layer(x, mask: mask, cache: layerCache, positionIds: positionIds)
             x = out
             newCaches.append(c)
         }
 
         x = norm(x)
+        guard generationStep < lm_head.count else {
+            print("CRASH AVOIDED [CodePredictor]: generationStep=\(generationStep) >= lm_head.count=\(lm_head.count)")
+            return (MLXArray.zeros(like: x), newCaches)
+        }
         let logits = lm_head[generationStep](x)
 
         return (logits, newCaches)

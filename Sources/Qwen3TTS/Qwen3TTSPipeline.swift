@@ -88,6 +88,21 @@ public final class Qwen3TTSPipeline: @unchecked Sendable {
         audioEncoder != nil
     }
 
+    /// The raw model type from config (nil for base, "voice_design", "custom_voice").
+    public var modelType: String? {
+        config.tts_model_type
+    }
+
+    /// Whether this model supports VoiceDesign (generating voices from text descriptions).
+    public var supportsVoiceDesign: Bool {
+        config.tts_model_type == "voice_design"
+    }
+
+    /// Whether this model supports CustomVoice (named speakers with instruct/style control).
+    public var supportsCustomVoice: Bool {
+        config.tts_model_type == "custom_voice"
+    }
+
     /// Load a Qwen3 TTS model from a local directory.
     ///
     /// The directory must contain:
@@ -313,6 +328,168 @@ public final class Qwen3TTSPipeline: @unchecked Sendable {
         maxTokens: Int? = nil,
         chunkSize: Int? = nil
     ) -> AsyncThrowingStream<AudioChunk, Error> {
+        _generateStreamImpl(
+            text: text,
+            speaker: speaker,
+            instruct: nil,
+            speakerEmbedding: speakerEmbedding,
+            temperature: temperature,
+            maxTokens: maxTokens,
+            chunkSize: chunkSize
+        )
+    }
+
+    // MARK: - VoiceDesign Generation
+
+    /// Generate speech using a voice description (VoiceDesign model only).
+    ///
+    /// The model generates a voice matching the text description, without requiring a speaker ID.
+    /// Requires a model with `tts_model_type == "voice_design"`.
+    ///
+    /// - Parameters:
+    ///   - text: Text to synthesize
+    ///   - voiceDescription: Natural language description of the desired voice (e.g., "deep male voice with British accent")
+    ///   - temperature: Generation temperature
+    ///   - maxTokens: Maximum tokens to generate
+    /// - Returns: Audio samples at 24kHz
+    public func generateVoiceDesign(
+        text: String,
+        voiceDescription: String,
+        temperature: Float? = nil,
+        maxTokens: Int? = nil
+    ) -> [Float] {
+        let temp = temperature ?? pipelineConfig.defaultTemperature
+        let tokens = maxTokens ?? pipelineConfig.defaultMaxTokens
+
+        return Device.withDefaultDevice(device) {
+            defer {
+                model.clearGenerationCache()
+                decoder.clearCompiledCache()
+                DeviceSelector.synchronizeIfNeeded(device: device)
+                Memory.clearCache()
+            }
+            return model.generate(
+                prompt: "",
+                text: text,
+                instruct: voiceDescription,
+                tokenizer: tokenizer,
+                decoder: decoder,
+                temperature: temp,
+                maxTokens: tokens
+            )
+        }
+    }
+
+    /// Stream audio using a voice description (VoiceDesign model only).
+    ///
+    /// - Parameters:
+    ///   - text: Text to synthesize
+    ///   - voiceDescription: Natural language description of the desired voice
+    ///   - temperature: Generation temperature
+    ///   - maxTokens: Maximum tokens to generate
+    ///   - chunkSize: Frames per streaming yield
+    /// - Returns: AsyncThrowingStream of AudioChunk
+    public func generateStreamVoiceDesign(
+        text: String,
+        voiceDescription: String,
+        temperature: Float? = nil,
+        maxTokens: Int? = nil,
+        chunkSize: Int? = nil
+    ) -> AsyncThrowingStream<AudioChunk, Error> {
+        _generateStreamImpl(
+            text: text,
+            speaker: "",
+            instruct: voiceDescription,
+            speakerEmbedding: nil,
+            temperature: temperature,
+            maxTokens: maxTokens,
+            chunkSize: chunkSize
+        )
+    }
+
+    // MARK: - CustomVoice Generation
+
+    /// Generate speech with a named speaker and style/emotion instruct (CustomVoice model only).
+    ///
+    /// Combines a built-in speaker identity with an instruct prompt for style control.
+    /// Requires a model with `tts_model_type == "custom_voice"`.
+    ///
+    /// - Parameters:
+    ///   - text: Text to synthesize
+    ///   - speaker: Speaker name (e.g., "Vivian")
+    ///   - instruct: Style/emotion instruction (e.g., "Say it angrily")
+    ///   - temperature: Generation temperature
+    ///   - maxTokens: Maximum tokens to generate
+    /// - Returns: Audio samples at 24kHz
+    public func generateCustomVoice(
+        text: String,
+        speaker: String,
+        instruct: String,
+        temperature: Float? = nil,
+        maxTokens: Int? = nil
+    ) -> [Float] {
+        let temp = temperature ?? pipelineConfig.defaultTemperature
+        let tokens = maxTokens ?? pipelineConfig.defaultMaxTokens
+
+        return Device.withDefaultDevice(device) {
+            defer {
+                model.clearGenerationCache()
+                decoder.clearCompiledCache()
+                DeviceSelector.synchronizeIfNeeded(device: device)
+                Memory.clearCache()
+            }
+            return model.generate(
+                prompt: speaker,
+                text: text,
+                instruct: instruct,
+                tokenizer: tokenizer,
+                decoder: decoder,
+                temperature: temp,
+                maxTokens: tokens
+            )
+        }
+    }
+
+    /// Stream audio with a named speaker and style/emotion instruct (CustomVoice model only).
+    ///
+    /// - Parameters:
+    ///   - text: Text to synthesize
+    ///   - speaker: Speaker name
+    ///   - instruct: Style/emotion instruction
+    ///   - temperature: Generation temperature
+    ///   - maxTokens: Maximum tokens to generate
+    ///   - chunkSize: Frames per streaming yield
+    /// - Returns: AsyncThrowingStream of AudioChunk
+    public func generateStreamCustomVoice(
+        text: String,
+        speaker: String,
+        instruct: String,
+        temperature: Float? = nil,
+        maxTokens: Int? = nil,
+        chunkSize: Int? = nil
+    ) -> AsyncThrowingStream<AudioChunk, Error> {
+        _generateStreamImpl(
+            text: text,
+            speaker: speaker,
+            instruct: instruct,
+            speakerEmbedding: nil,
+            temperature: temperature,
+            maxTokens: maxTokens,
+            chunkSize: chunkSize
+        )
+    }
+
+    // MARK: - Streaming Implementation
+
+    private func _generateStreamImpl(
+        text: String,
+        speaker: String,
+        instruct: String?,
+        speakerEmbedding: [Float]?,
+        temperature: Float?,
+        maxTokens: Int?,
+        chunkSize: Int?
+    ) -> AsyncThrowingStream<AudioChunk, Error> {
         let temp = temperature ?? pipelineConfig.defaultTemperature
         let tokens = maxTokens ?? pipelineConfig.defaultMaxTokens
         let chunk = chunkSize ?? pipelineConfig.defaultStreamingChunkSize
@@ -331,6 +508,7 @@ public final class Qwen3TTSPipeline: @unchecked Sendable {
                         capturedModel.generateStream(
                             prompt: speaker,
                             text: text,
+                            instruct: instruct,
                             speakerEmbedding: speakerEmbed,
                             tokenizer: capturedTokenizer,
                             temperature: temp,
@@ -466,6 +644,7 @@ public final class Qwen3TTSPipeline: @unchecked Sendable {
     public func generateToFile(
         text: String,
         speaker: String = "",
+        instruct: String? = nil,
         speakerEmbedding: [Float]? = nil,
         referenceTranscript: String? = nil,
         referenceAudioCodes: [[Int32]]? = nil,
@@ -502,6 +681,7 @@ public final class Qwen3TTSPipeline: @unchecked Sendable {
                         codes = self.model.generateCodes(
                             prompt: speaker,
                             text: textChunk,
+                            instruct: instruct,
                             speakerEmbedding: speakerEmbed,
                             referenceTranscript: referenceTranscript,
                             referenceAudioCodes: referenceAudioCodes,
@@ -594,6 +774,7 @@ public final class Qwen3TTSPipeline: @unchecked Sendable {
     public func generateBatch(
         text: String,
         speaker: String = "",
+        instruct: String? = nil,
         speakerEmbedding: [Float]? = nil,
         referenceTranscript: String? = nil,
         temperature: Float? = nil,
@@ -632,6 +813,7 @@ public final class Qwen3TTSPipeline: @unchecked Sendable {
                     let codes = self.model.generateCodes(
                         prompt: speaker,
                         text: textChunk,
+                        instruct: instruct,
                         speakerEmbedding: speakerEmbed,
                         referenceTranscript: referenceTranscript,
                         tokenizer: self.tokenizer,

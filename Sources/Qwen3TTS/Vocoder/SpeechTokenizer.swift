@@ -517,9 +517,17 @@ public class ResidualVectorQuantization: Module {
     }
 
     public func decode(_ codes: MLXArray) -> MLXArray {
+        guard !layers.isEmpty else {
+            print("CRASH AVOIDED [RVQ.decode]: layers is empty!")
+            return MLXArray.zeros([codes.shape[1], 1, codes.shape[2]])
+        }
         var quantized = MLXArray.zeros([codes.shape[1], layers[0].codebook.dim, codes.shape[2]])
 
-        for idx in 0..<codes.shape[0] {
+        let numIter = min(codes.shape[0], layers.count)
+        if codes.shape[0] != layers.count {
+            print("CRASH AVOIDED [RVQ.decode]: codes.shape[0]=\(codes.shape[0]) != layers.count=\(layers.count), using min=\(numIter)")
+        }
+        for idx in 0..<numIter {
             let layerCodes = codes[idx]
             quantized = quantized + layers[idx].decode(layerCodes)
         }
