@@ -339,11 +339,11 @@ public class Qwen3Talker: Module {
         let useICL = referenceAudioCodes != nil && referenceTranscript != nil && !referenceTranscript!.isEmpty
         let speakerName = prompt.lowercased()
         let speakerId = config.spk_id[speakerName]
-        print("DEBUG [generateCodes]: entry prompt='\(prompt.prefix(30))' text='\(text.prefix(30))' speakerId=\(speakerId as Any) spkEmbed=\(speakerEmbedding?.shape ?? []) useICL=\(useICL)")
+        print("DEBUG [generateCodes]: entry prompt='\(prompt.prefix(30))' text='\(text.prefix(30))' speakerId=\(speakerId as Any) spkEmbed=\(speakerEmbedding?.shape ?? []) useICL=\(useICL)"); fflush(stdout)
 
         let chatText = "<|im_start|>assistant\n\(text)<|im_end|>\n<|im_start|>assistant\n"
         let inputIds = tokenizer.encode(text: chatText).asType(.int32)
-        print("DEBUG [generateCodes]: inputIds shape=\(inputIds.shape)")
+        print("DEBUG [generateCodes]: inputIds shape=\(inputIds.shape)"); fflush(stdout)
 
         let minTokens = 9
         guard inputIds.shape[1] >= minTokens else {

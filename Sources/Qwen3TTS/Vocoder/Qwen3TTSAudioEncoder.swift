@@ -15,34 +15,14 @@ public class Qwen3TTSAudioEncoder: Module {
     }
 
     /// Load encoder weights from the speech tokenizer safetensors file.
-    /// Throws if encoder weights are not found in the file.
+    /// Throws because the audio encoder forward pass is not yet implemented.
     public func loadWeights(from weightsURL: URL) throws {
-        guard FileManager.default.fileExists(atPath: weightsURL.path) else {
-            throw NSError(domain: "Qwen3TTSAudioEncoder", code: 404, userInfo: [
-                NSLocalizedDescriptionKey: "Weights file not found at \(weightsURL.path)"
-            ])
-        }
-
-        let weights = try MLX.loadArrays(url: weightsURL, stream: .cpu)
-
-        // Check if encoder weights exist in this file
-        let hasEncoderWeights = weights.keys.contains { $0.hasPrefix("encoder.") }
-        guard hasEncoderWeights else {
-            throw NSError(domain: "Qwen3TTSAudioEncoder", code: 501, userInfo: [
-                NSLocalizedDescriptionKey: "No encoder weights found in speech tokenizer"
-            ])
-        }
-
-        // Filter and load encoder weights
-        let encoderWeights = Dictionary(
-            uniqueKeysWithValues: weights
-                .filter { $0.key.hasPrefix("encoder.") }
-                .map { ($0.key, $0.value) }
-        )
-
-        let parameters = ModuleParameters.unflattened(encoderWeights)
-        update(parameters: parameters)
-        eval(self.parameters())
+        // The encoder forward pass (callAsFunction) is not implemented yet.
+        // Loading weights without a working forward pass causes shape mismatches
+        // when encodeReferenceAudio tries to index the output as [batch, quantizers, time].
+        throw NSError(domain: "Qwen3TTSAudioEncoder", code: 501, userInfo: [
+            NSLocalizedDescriptionKey: "Audio encoder forward pass not implemented — ICL encoding unavailable"
+        ])
     }
 
     /// Encode audio waveform into quantized codes.
