@@ -16,7 +16,7 @@ A Swift Package for running [Qwen3-TTS](https://huggingface.co/Qwen/Qwen3-TTS) t
 - Apple Silicon Mac or iOS device
 - macOS 14+ or iOS 17+
 - Swift 5.9+
-- A Qwen3-TTS model (see [Model Download](#model-download))
+- A Qwen3-TTS model — 0.6B or 1.7B (see [Model Download](#model-download))
 
 ## Installation
 
@@ -93,11 +93,13 @@ Download a pre-quantized model from HuggingFace:
 brew install git-lfs
 git lfs install
 
-# Download a model (8-bit quantized, ~2GB)
-git clone https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit
+# 0.6B models
+git clone https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit  # ~2GB
+git clone https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-Base-4bit  # ~1.7GB
 
-# Or smaller quantizations for less memory
-git clone https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-Base-4bit
+# 1.7B models (higher quality, more memory)
+git clone https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit  # ~3.1GB
+git clone https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-1.7B-Base-4bit  # ~2.3GB
 ```
 
 The model directory should contain:
