@@ -93,7 +93,7 @@ Download a pre-quantized model from HuggingFace:
 brew install git-lfs
 git lfs install
 
-# Download a model (8-bit quantized, ~1GB)
+# Download a model (8-bit quantized, ~2GB)
 git clone https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit
 
 # Or smaller quantizations for less memory
@@ -108,7 +108,7 @@ The model directory should contain:
 
 ## Available Speakers
 
-Built-in speakers (varies by model): Aiden, Dylan, Eric, Ono Anna, Ryan, Serena, Sohee, Uncle Fu, Vivian
+Built-in speakers (varies by model): aiden, dylan, eric, ono_anna, ryan, serena, sohee, uncle_fu, vivian
 
 ## API Reference
 
