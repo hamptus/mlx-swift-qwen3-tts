@@ -7,6 +7,8 @@ A Swift Package for running [Qwen3-TTS](https://huggingface.co/Qwen/Qwen3-TTS) t
 - High-quality text-to-speech with multiple built-in voices
 - Streaming audio generation for low-latency playback
 - Voice cloning via speaker embeddings
+- VoiceDesign: generate voices from text descriptions (1.7B only)
+- CustomVoice: named speakers with style/emotion control (1.7B only)
 - Memory-efficient long text generation with automatic chunking
 - Pre-quantized and runtime quantization support (4-bit/6-bit)
 - macOS 14+ and iOS 17+ (Apple Silicon required)
@@ -72,6 +74,54 @@ if let embedding = pipeline.extractSpeakerEmbedding(audioSamples: referenceAudio
 }
 ```
 
+### VoiceDesign (1.7B only)
+
+Generate speech using a natural language voice description. Requires a VoiceDesign model.
+
+```swift
+let pipeline = try Qwen3TTSPipeline(modelPath: voiceDesignModelURL)
+
+// Generate with a described voice
+let samples = pipeline.generateVoiceDesign(
+    text: "Hello world!",
+    voiceDescription: "A deep male voice with a British accent, speaking slowly and calmly"
+)
+
+// Streaming
+for try await chunk in pipeline.generateStreamVoiceDesign(
+    text: "Hello world!",
+    voiceDescription: "A cheerful young female voice"
+) {
+    // Play chunk.samples
+    if chunk.isFinal { break }
+}
+```
+
+### CustomVoice (1.7B only)
+
+Combine a named speaker with style/emotion instructions. Requires a CustomVoice model.
+
+```swift
+let pipeline = try Qwen3TTSPipeline(modelPath: customVoiceModelURL)
+
+// Generate with speaker + style control
+let samples = pipeline.generateCustomVoice(
+    text: "I can't believe it!",
+    speaker: "Vivian",
+    instruct: "Say it with excitement and surprise"
+)
+
+// Streaming
+for try await chunk in pipeline.generateStreamCustomVoice(
+    text: "I'm so sorry to hear that.",
+    speaker: "Aiden",
+    instruct: "Speak with empathy and concern"
+) {
+    // Play chunk.samples
+    if chunk.isFinal { break }
+}
+```
+
 ### Long Text to File
 
 ```swift
@@ -100,6 +150,14 @@ git clone https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-Base-4bit  # 
 # 1.7B models (higher quality, more memory)
 git clone https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit  # ~3.1GB
 git clone https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-1.7B-Base-4bit  # ~2.3GB
+
+# 1.7B VoiceDesign (generate voices from text descriptions)
+git clone https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-8bit
+git clone https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-4bit
+
+# 1.7B CustomVoice (named speakers + style/emotion instruct)
+git clone https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit
+git clone https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-4bit
 ```
 
 The model directory should contain:
@@ -124,6 +182,10 @@ The main entry point. Load a model and generate speech.
 | `generate(text:speaker:)` | Simple generation with built-in voice |
 | `generate(text:speakerEmbedding:)` | Generation with cloned voice |
 | `generateStream(text:speaker:)` | Streaming generation |
+| `generateVoiceDesign(text:voiceDescription:)` | Generate with described voice (VoiceDesign) |
+| `generateStreamVoiceDesign(text:voiceDescription:)` | Stream with described voice (VoiceDesign) |
+| `generateCustomVoice(text:speaker:instruct:)` | Generate with speaker + style (CustomVoice) |
+| `generateStreamCustomVoice(text:speaker:instruct:)` | Stream with speaker + style (CustomVoice) |
 | `generateToFile(text:speaker:outputURL:)` | Memory-efficient file output |
 | `generateBatch(text:speaker:)` | Batch generation for long text |
 | `extractSpeakerEmbedding(audioSamples:)` | Extract voice embedding |
@@ -137,6 +199,9 @@ The main entry point. Load a model and generate speech.
 | `availableSpeakers` | Built-in speaker names |
 | `supportsVoiceCloning` | Whether speaker encoder is loaded |
 | `supportsICL` | Whether audio encoder is loaded |
+| `supportsVoiceDesign` | Whether model supports VoiceDesign |
+| `supportsCustomVoice` | Whether model supports CustomVoice |
+| `modelType` | Raw model type string from config |
 | `sampleRate` | Audio sample rate (24000 Hz) |
 
 ### `AudioSampleWriter`

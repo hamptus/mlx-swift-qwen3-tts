@@ -187,6 +187,9 @@ private func speakerEncoderSTFT(
     eval(paddedArray)
 
     let paddedFlat = paddedArray.asArray(Float.self)
+    let maxAccess = numFrames > 0 ? (numFrames - 1) * hopLength + nFFT - 1 : -1
+    print("DEBUG [stft]: paddedFlat.count=\(paddedFlat.count) numFrames=\(numFrames) nFFT=\(nFFT) hop=\(hopLength) maxAccess=\(maxAccess)")
+    precondition(numFrames == 0 || maxAccess < paddedFlat.count, "stft: would access index \(maxAccess) in array of size \(paddedFlat.count)")
 
     var framesFlat: [Float] = []
     framesFlat.reserveCapacity(numFrames * nFFT)

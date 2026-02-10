@@ -115,6 +115,99 @@ final class ConfigTests: XCTestCase {
         XCTAssertFalse(fp.enabled)
     }
 
+    func testStandardConfigModelTypeIsNil() {
+        let config = Qwen3TTSConfig.standard
+        XCTAssertNil(config.tts_model_type)
+    }
+
+    func testConfigDecodingBaseModelType() throws {
+        // No tts_model_type key → nil (base model)
+        let json = """
+        {
+            "hidden_size": 1024,
+            "num_hidden_layers": 28,
+            "vocab_size": 3072,
+            "text_vocab_size": 151936,
+            "num_attention_heads": 16,
+            "intermediate_size": 3072,
+            "rms_norm_eps": 1e-6,
+            "max_position_embeddings": 32768,
+            "rope_theta": 1000000.0
+        }
+        """
+        let data = json.data(using: .utf8)!
+        let config = try JSONDecoder().decode(Qwen3TTSConfig.self, from: data)
+        XCTAssertNil(config.tts_model_type)
+    }
+
+    func testConfigDecodingVoiceDesignModelType() throws {
+        let json = """
+        {
+            "hidden_size": 1024,
+            "num_hidden_layers": 28,
+            "vocab_size": 3072,
+            "text_vocab_size": 151936,
+            "num_attention_heads": 16,
+            "intermediate_size": 3072,
+            "rms_norm_eps": 1e-6,
+            "max_position_embeddings": 32768,
+            "rope_theta": 1000000.0,
+            "tts_model_type": "voice_design"
+        }
+        """
+        let data = json.data(using: .utf8)!
+        let config = try JSONDecoder().decode(Qwen3TTSConfig.self, from: data)
+        XCTAssertEqual(config.tts_model_type, "voice_design")
+    }
+
+    func testConfigDecodingCustomVoiceModelType() throws {
+        let json = """
+        {
+            "hidden_size": 1024,
+            "num_hidden_layers": 28,
+            "vocab_size": 3072,
+            "text_vocab_size": 151936,
+            "num_attention_heads": 16,
+            "intermediate_size": 3072,
+            "rms_norm_eps": 1e-6,
+            "max_position_embeddings": 32768,
+            "rope_theta": 1000000.0,
+            "tts_model_type": "custom_voice"
+        }
+        """
+        let data = json.data(using: .utf8)!
+        let config = try JSONDecoder().decode(Qwen3TTSConfig.self, from: data)
+        XCTAssertEqual(config.tts_model_type, "custom_voice")
+    }
+
+    func testConfigDecodingModelTypeInNestedTalkerConfig() throws {
+        // tts_model_type is at root level, even when talker_config is nested
+        let json = """
+        {
+            "talker_config": {
+                "hidden_size": 1024,
+                "num_hidden_layers": 28,
+                "vocab_size": 3072,
+                "text_vocab_size": 151936,
+                "num_attention_heads": 16,
+                "intermediate_size": 3072,
+                "rms_norm_eps": 1e-6,
+                "max_position_embeddings": 32768,
+                "rope_theta": 1000000.0,
+                "spk_id": {}
+            },
+            "tts_model_type": "voice_design",
+            "tts_bos_token_id": 151672,
+            "tts_eos_token_id": 151673,
+            "tts_pad_token_id": 151671
+        }
+        """
+        let data = json.data(using: .utf8)!
+        let config = try JSONDecoder().decode(Qwen3TTSConfig.self, from: data)
+        XCTAssertEqual(config.tts_model_type, "voice_design")
+        XCTAssertEqual(config.hidden_size, 1024)
+    }
+
     func testCodePredictorConfigDefaults() {
         let config = CodePredictorConfigJSON()
         XCTAssertEqual(config.hidden_size, 1024)

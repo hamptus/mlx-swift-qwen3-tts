@@ -93,6 +93,9 @@ public struct Qwen3TTSConfig: Codable, Sendable {
     // Code predictor config
     public var code_predictor_config: CodePredictorConfigJSON
 
+    // Model type (nil = base, "voice_design", "custom_voice")
+    public var tts_model_type: String?
+
     // MRoPE section sizes
     public var mrope_section: [Int]?
     public var quantization: QuantizationConfig?
@@ -152,6 +155,7 @@ public struct Qwen3TTSConfig: Codable, Sendable {
         case rope_scaling
         case quantization
         case quantization_config
+        case tts_model_type
     }
 
     struct RopeScaling: Codable {
@@ -169,7 +173,8 @@ public struct Qwen3TTSConfig: Codable, Sendable {
         codec_nothink_id: Int = 2155, codec_think_bos_id: Int = 2156, codec_think_eos_id: Int = 2157,
         spk_id: [String: Int] = [:],
         code_predictor_config: CodePredictorConfigJSON = CodePredictorConfigJSON(),
-        mrope_section: [Int]? = nil
+        mrope_section: [Int]? = nil,
+        tts_model_type: String? = nil
     ) {
         self.hidden_size = hidden_size
         self.num_hidden_layers = num_hidden_layers
@@ -195,6 +200,7 @@ public struct Qwen3TTSConfig: Codable, Sendable {
         self.spk_id = spk_id
         self.code_predictor_config = code_predictor_config
         self.mrope_section = mrope_section
+        self.tts_model_type = tts_model_type
         self.quantization = nil
         self.quantization_config = nil
     }
@@ -241,6 +247,7 @@ public struct Qwen3TTSConfig: Codable, Sendable {
         } else {
             self.mrope_section = nil
         }
+        self.tts_model_type = try container.decodeIfPresent(String.self, forKey: .tts_model_type)
         self.quantization = try container.decodeIfPresent(QuantizationConfig.self, forKey: .quantization)
         self.quantization_config = try container.decodeIfPresent(QuantizationConfig.self, forKey: .quantization_config)
     }
@@ -259,6 +266,7 @@ public struct Qwen3TTSConfig: Codable, Sendable {
         try container.encode(rms_norm_eps, forKey: .rms_norm_eps)
         try container.encode(max_position_embeddings, forKey: .max_position_embeddings)
         try container.encode(rope_theta, forKey: .rope_theta)
+        try container.encodeIfPresent(tts_model_type, forKey: .tts_model_type)
         try container.encodeIfPresent(quantization, forKey: .quantization)
         try container.encodeIfPresent(quantization_config, forKey: .quantization_config)
     }
