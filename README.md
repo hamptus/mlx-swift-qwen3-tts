@@ -6,7 +6,7 @@ A Swift Package for running [Qwen3-TTS](https://huggingface.co/Qwen/Qwen3-TTS) t
 
 - High-quality text-to-speech with multiple built-in voices
 - Streaming audio generation for low-latency playback
-- Voice cloning via speaker embeddings
+- Voice cloning via speaker embeddings or ICL (in-context learning) reference audio
 - VoiceDesign: generate voices from text descriptions (1.7B only)
 - CustomVoice: named speakers with style/emotion control (1.7B only)
 - Memory-efficient long text generation with automatic chunking
@@ -26,7 +26,7 @@ Add to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/hamptus/mlx-swift-qwen3-tts", from: "0.1.0"),
+    .package(url: "https://github.com/hamptus/mlx-swift-qwen3-tts", from: "0.2.0"),
 ]
 ```
 
@@ -71,6 +71,24 @@ for try await chunk in pipeline.generateStream(text: "Hello world!", speaker: "A
 // Extract speaker embedding from reference audio
 if let embedding = pipeline.extractSpeakerEmbedding(audioSamples: referenceAudio) {
     let samples = pipeline.generate(text: "Hello!", speakerEmbedding: embedding)
+}
+```
+
+### ICL Voice Cloning
+
+Clone a voice by encoding reference audio into codes, then passing them to generation.
+
+```swift
+// Encode reference audio (24kHz float samples)
+if let codes = pipeline.encodeReferenceAudio(audioSamples: referenceAudio) {
+    // Generate speech in the cloned voice
+    let sampleCount = try await pipeline.generateToFile(
+        text: "Hello in a cloned voice!",
+        speaker: "Aiden",
+        referenceTranscript: "The transcript of the reference audio.",
+        referenceAudioCodes: codes,
+        outputURL: outputURL
+    )
 }
 ```
 
