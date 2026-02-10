@@ -5,7 +5,7 @@ import MLXRandom
 
 // MARK: - Code Predictor Rotary Embedding
 
-class CodePredictorRotaryEmbedding: Module {
+nonisolated class CodePredictorRotaryEmbedding: Module {
     let dim: Int
     let base: Float
     let invFreq: MLXArray
@@ -29,7 +29,7 @@ class CodePredictorRotaryEmbedding: Module {
 
 // MARK: - Code Predictor Attention
 
-class CodePredictorAttention: Module {
+nonisolated class CodePredictorAttention: Module {
     let numHeads: Int
     let numKVHeads: Int
     let headDim: Int
@@ -115,7 +115,7 @@ class CodePredictorAttention: Module {
 
 // MARK: - Code Predictor Decoder Layer
 
-class CodePredictorDecoderLayer: Module {
+nonisolated class CodePredictorDecoderLayer: Module {
     let self_attn: CodePredictorAttention
     let mlp: Qwen3MLP
     let input_layernorm: Qwen3RMSNorm
@@ -139,7 +139,7 @@ class CodePredictorDecoderLayer: Module {
 
 // MARK: - Code Predictor
 
-public class Qwen3CodePredictor: Module {
+nonisolated public class Qwen3CodePredictor: Module {
     let config: CodePredictorConfig
     let talkerHiddenSize: Int
 

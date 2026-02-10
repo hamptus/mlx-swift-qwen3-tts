@@ -58,6 +58,7 @@ public struct AudioDecoderConfig: Codable, Sendable {
     }
 
     public var decoder_config: DecoderInternalConfig?
+    public var encoder_config: Qwen3TTSTokenizerEncoderConfig?
     public var input_sample_rate: Int?
     public var output_sample_rate: Int?
     public var decode_upsample_rate: Int?
@@ -67,6 +68,7 @@ public struct AudioDecoderConfig: Codable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case decoder_config
+        case encoder_config
         case input_sample_rate
         case output_sample_rate
         case decode_upsample_rate
@@ -101,7 +103,7 @@ public struct AudioDecoderConfig: Codable, Sendable {
 
 // MARK: - AudioDecoder
 
-public class AudioDecoder: Module {
+nonisolated public class AudioDecoder: Module {
     private let config: AudioDecoderConfig
     private var mlxDecoder: Qwen3TTSSpeechTokenizerDecoder?
 

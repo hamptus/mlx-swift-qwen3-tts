@@ -211,7 +211,7 @@ public final class Qwen3TTSPipeline: @unchecked Sendable {
             var audioEncoder: Qwen3TTSAudioEncoder? = nil
             do {
                 let encoder = Qwen3TTSAudioEncoder()
-                try encoder.loadWeights(from: speechWeightsURL)
+                try encoder.loadWeights(from: speechWeightsURL, configURL: speechConfigURL)
                 audioEncoder = encoder
             } catch {
                 // ICL mode unavailable
