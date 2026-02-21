@@ -64,4 +64,44 @@ final class TokenizerTests: XCTestCase {
         // Without loading, encode returns UTF-8 bytes
         XCTAssertEqual(ids, [72, 105]) // 'H' = 72, 'i' = 105
     }
+    
+    func testByteLevelEncodingForNonLatinText() {
+        // Build GPT/Qwen byte-to-unicode map used by byte-level BPE.
+        var bs: [UInt8] = []
+        bs += Array(UInt8(33)...UInt8(126))
+        bs += Array(UInt8(161)...UInt8(172))
+        bs += Array(UInt8(174)...UInt8(255))
+
+        var cs = bs.map { Int($0) }
+        var n = 0
+        for b in UInt8.min...UInt8.max {
+            if !bs.contains(b) {
+                bs.append(b)
+                cs.append(256 + n)
+                n += 1
+            }
+        }
+
+        var byteToUnicode: [UInt8: Character] = [:]
+        for (b, c) in zip(bs, cs) {
+            if let scalar = UnicodeScalar(c) {
+                byteToUnicode[b] = Character(scalar)
+            }
+        }
+
+        let text = "あ"
+        let utf8Bytes = Array(text.utf8)
+
+        // Vocab intentionally excludes <0xXX> tokens and raw "あ".
+        // It only includes byte-level mapped chars, which should be sufficient.
+        var vocab: [String: Int] = [:]
+        for (idx, byte) in utf8Bytes.enumerated() {
+            vocab[String(byteToUnicode[byte]!)] = idx
+        }
+
+        let tokenizer = Qwen3Tokenizer(vocab: vocab, merges: [])
+        let ids: [Int32] = tokenizer.encode(text: text)
+
+        XCTAssertEqual(ids, [0, 1, 2])
+    }
 }
