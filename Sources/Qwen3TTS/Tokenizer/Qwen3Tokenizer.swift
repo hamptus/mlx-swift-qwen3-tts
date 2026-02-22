@@ -250,6 +250,33 @@ public class Qwen3Tokenizer {
     // Cached regex for splitting text
     private static let splitRegex = try! NSRegularExpression(pattern: #"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"#)
 
+    // GPT-2/Qwen byte-to-unicode mapping used for byte-level BPE
+    private static let byteToUnicode: [UInt8: Character] = {
+        var bs: [UInt8] = []
+        bs += Array(UInt8(33)...UInt8(126))
+        bs += Array(UInt8(161)...UInt8(172))
+        bs += Array(UInt8(174)...UInt8(255))
+
+        var cs = bs.map { Int($0) }
+        var n = 0
+        for b in UInt8.min...UInt8.max {
+            if !bs.contains(b) {
+                bs.append(b)
+                cs.append(256 + n)
+                n += 1
+            }
+        }
+
+        var map: [UInt8: Character] = [:]
+        map.reserveCapacity(256)
+        for (b, c) in zip(bs, cs) {
+            if let scalar = UnicodeScalar(c) {
+                map[b] = Character(scalar)
+            }
+        }
+        return map
+    }()
+
     /// Encode regular text (non-special tokens) using BPE
     private func encodeRegularText(_ text: String) -> [Int32] {
         var allIds: [Int32] = []
@@ -271,23 +298,34 @@ public class Qwen3Tokenizer {
         }
 
         for token in subTokens {
-            let bpeTokens = bpe(token)
+            let bpeTokens = bpe(encodeByteLevelToken(token))
             for bToken in bpeTokens {
                 if let id = vocab[bToken] {
                     allIds.append(Int32(id))
                 } else {
                     // Byte-level fallback
-                    for byte in bToken.utf8 {
-                         let byteToken = String(format: "<0x%02X>", byte)
-                         if let id = vocab[byteToken] {
-                             allIds.append(Int32(id))
-                         }
+                    for char in bToken {
+                        if let id = vocab[String(char)] {
+                            allIds.append(Int32(id))
+                        }
                     }
                 }
             }
         }
 
         return allIds
+    }
+
+    private func encodeByteLevelToken(_ token: String) -> String {
+        var encoded = String()
+        encoded.reserveCapacity(token.utf8.count)
+
+        for byte in token.utf8 {
+            if let mapped = Self.byteToUnicode[byte] {
+                encoded.append(mapped)
+            }
+        }
+        return encoded
     }
 
     public func decode(ids: [Int32]) -> String {
