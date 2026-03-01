@@ -118,6 +118,7 @@ func trimKVCache(_ cache: [KVCache], maxWindow: Int) -> [KVCache] {
     return cache.map { (k, v) in
         let kTrimmed = k[0..., 0..., startIdx..., 0...]
         let vTrimmed = v[0..., 0..., startIdx..., 0...]
+        eval(kTrimmed, vTrimmed)
         return (kTrimmed, vTrimmed)
     }
 }
