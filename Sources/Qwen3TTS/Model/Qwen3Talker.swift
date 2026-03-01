@@ -277,7 +277,7 @@ nonisolated public class Qwen3Talker: Module {
         topK: Int = 0,
         eosTokenId: Int32 = 2150,
         repetitionPenalty: Float = 1.05,
-        generatedTokens: [Int32]? = nil
+        generatedTokenSet: Set<Int32>? = nil
     ) -> MLXArray {
         var logits = logits
 
@@ -285,10 +285,9 @@ nonisolated public class Qwen3Talker: Module {
             logits = logits[0..., (logits.shape[1] - 1)..<logits.shape[1], 0...].squeezed(axis: 1)
         }
 
-        if let tokens = generatedTokens, !tokens.isEmpty, repetitionPenalty != 1.0 {
+        if let uniqueTokens = generatedTokenSet, !uniqueTokens.isEmpty, repetitionPenalty != 1.0 {
             let vocabSize = logits.shape.last!
             var penaltyValues = [Float](repeating: 1.0, count: vocabSize)
-            let uniqueTokens = Set(tokens)
             for token in uniqueTokens {
                 let idx = Int(token)
                 if idx < vocabSize {
@@ -339,15 +338,16 @@ nonisolated public class Qwen3Talker: Module {
         let useICL = referenceAudioCodes != nil && referenceTranscript != nil && !referenceTranscript!.isEmpty
         let speakerName = prompt.lowercased()
         let speakerId = config.spk_id[speakerName]
-        print("DEBUG [generateCodes]: entry prompt='\(prompt.prefix(30))' text='\(text.prefix(30))' speakerId=\(speakerId as Any) spkEmbed=\(speakerEmbedding?.shape ?? []) useICL=\(useICL)"); fflush(stdout)
+        let debugGenEntry = ProcessInfo.processInfo.environment["DUPER_DEBUG_GENERATION"] == "1"
+        if debugGenEntry { print("DEBUG [generateCodes]: entry prompt='\(prompt.prefix(30))' text='\(text.prefix(30))' speakerId=\(speakerId as Any) spkEmbed=\(speakerEmbedding?.shape ?? []) useICL=\(useICL)"); fflush(stdout) }
 
         let chatText = "<|im_start|>assistant\n\(text)<|im_end|>\n<|im_start|>assistant\n"
         let inputIds = tokenizer.encode(text: chatText).asType(.int32)
-        print("DEBUG [generateCodes]: inputIds shape=\(inputIds.shape)"); fflush(stdout)
+        if debugGenEntry { print("DEBUG [generateCodes]: inputIds shape=\(inputIds.shape)"); fflush(stdout) }
 
         let minTokens = 9
         guard inputIds.shape[1] >= minTokens else {
-            print("DEBUG [generateCodes]: input too short (\(inputIds.shape[1]) < \(minTokens))")
+            if debugGenEntry { print("DEBUG [generateCodes]: input too short (\(inputIds.shape[1]) < \(minTokens))") }
             return []
         }
 
@@ -432,10 +432,11 @@ nonisolated public class Qwen3Talker: Module {
             trailingTextHidden = ttsEosEmbed
         }
 
-        print("DEBUG [generateCodes]: inputEmbeds shape=\(inputEmbeds.shape) trailingLen=\(trailingLen)")
+        let debugGen = ProcessInfo.processInfo.environment["DUPER_DEBUG_GENERATION"] == "1"
+        if debugGen { print("DEBUG [generateCodes]: inputEmbeds shape=\(inputEmbeds.shape) trailingLen=\(trailingLen)") }
         var (h, cache) = self.callAsFunction(inputEmbeds, cache: nil, positionOffset: nil)
         var positionOffset = inputEmbeds.shape[1]
-        print("DEBUG [generateCodes]: prefill done, h shape=\(h.shape), positionOffset=\(positionOffset)")
+        if debugGen { print("DEBUG [generateCodes]: prefill done, h shape=\(h.shape), positionOffset=\(positionOffset)") }
 
         var generatedCodes: [[Int32]] = []
         let eosTokenId: Int32 = Int32(config.codec_eos_token_id)
@@ -443,18 +444,26 @@ nonisolated public class Qwen3Talker: Module {
         var trailingIdx = 0
         var consecutivePad = 0
         let numCodeGroups = config.code_predictor_config.num_code_groups
-        print("DEBUG [generateCodes]: numCodeGroups=\(numCodeGroups), code_predictor embeddings=\(code_predictor.codec_embedding.count), lm_heads=\(code_predictor.lm_head.count)")
+        if debugGen { print("DEBUG [generateCodes]: numCodeGroups=\(numCodeGroups), code_predictor embeddings=\(code_predictor.codec_embedding.count), lm_heads=\(code_predictor.lm_head.count)") }
 
         var logits = codec_head(h)
 
         var generatedCode0Tokens: [Int32] = []
-        var generatedCodePredictorTokens: [[Int32]] = Array(repeating: [], count: numCodeGroups - 1)
+        var generatedCode0TokensSet: Set<Int32> = []
+        var generatedCodePredictorSets: [Set<Int32>] = Array(repeating: Set(), count: numCodeGroups - 1)
+
+        // Pre-compute EOS/pad mask once — vocabSize is constant across steps
+        let vocabSizeForMask = logits.shape.last!
+        var eosMaskValues = [Float](repeating: 0.0, count: vocabSizeForMask)
+        if Int(eosTokenId) < vocabSizeForMask { eosMaskValues[Int(eosTokenId)] = -Float.infinity }
+        if Int(padTokenId) < vocabSizeForMask { eosMaskValues[Int(padTokenId)] = -Float.infinity }
+        let eosMaskArray = MLXArray(eosMaskValues).expandedDimensions(axis: 0)
 
         let totalTextTokens = trailingTextHidden.shape[1]
 
         for step in 0..<maxTokens {
             if Task.isCancelled { break }
-            if step < 3 || step % 50 == 0 {
+            if debugGen && (step < 3 || step % 50 == 0) {
                 print("DEBUG [generateCodes]: step \(step), logits shape=\(logits.shape), trailingIdx=\(trailingIdx)/\(totalTextTokens)")
             }
 
@@ -462,25 +471,16 @@ nonisolated public class Qwen3Talker: Module {
 
             var samplingLogits = logits
             if hasRemainingText {
-                let vocabSize = logits.shape.last!
-                if vocabSize > Int(eosTokenId) {
-                    var maskValues = [Float](repeating: 0.0, count: vocabSize)
-                    maskValues[Int(eosTokenId)] = -Float.infinity
-                    if Int(padTokenId) < vocabSize {
-                        maskValues[Int(padTokenId)] = -Float.infinity
-                    }
-                    let maskArray = MLXArray(maskValues).expandedDimensions(axis: 0)
-                    samplingLogits = logits + maskArray
-                }
+                samplingLogits = logits + eosMaskArray
             }
 
             let nextToken = sampleToken(
                 logits: samplingLogits,
                 temperature: temperature,
-                generatedTokens: generatedCode0Tokens.isEmpty ? nil : generatedCode0Tokens
+                generatedTokenSet: generatedCode0TokensSet.isEmpty ? nil : generatedCode0TokensSet
             )
             let code0Value = nextToken[0].item(Int32.self)
-            if step < 3 { print("DEBUG [generateCodes]: step \(step) code0=\(code0Value)") }
+            if debugGen && step < 3 { print("DEBUG [generateCodes]: step \(step) code0=\(code0Value)") }
 
             if code0Value == eosTokenId {
                 break
@@ -504,39 +504,29 @@ nonisolated public class Qwen3Talker: Module {
                     let code0Embed = codec_embedding(nextTokenArray)
                     codeInput = concatenated([codeHidden, code0Embed], axis: 1)
                 } else {
-                    guard codeIdx < codeTokens.count else {
-                        print("CRASH AVOIDED [generateCodes]: codeIdx=\(codeIdx) >= codeTokens.count=\(codeTokens.count)")
-                        break
-                    }
-                    guard codeIdx - 1 < code_predictor.codec_embedding.count else {
-                        print("CRASH AVOIDED [generateCodes]: codeIdx-1=\(codeIdx-1) >= codec_embedding.count=\(code_predictor.codec_embedding.count)")
-                        break
-                    }
+                    guard codeIdx < codeTokens.count else { break }
+                    guard codeIdx - 1 < code_predictor.codec_embedding.count else { break }
                     let prevCode = MLXArray([codeTokens[codeIdx]]).expandedDimensions(axis: 0)
                     codeInput = code_predictor.codec_embedding[codeIdx - 1](prevCode)
                 }
                 let (codeLogits, newCodeCache) = code_predictor(codeInput, cache: codePredictorCache, generationStep: codeIdx)
                 codePredictorCache = newCodeCache
 
-                let codebookHistory = generatedCodePredictorTokens[codeIdx]
                 let codeToken = sampleToken(
                     logits: codeLogits,
                     temperature: temperature,
-                    generatedTokens: codebookHistory.isEmpty ? nil : codebookHistory
+                    generatedTokenSet: generatedCodePredictorSets[codeIdx].isEmpty ? nil : generatedCodePredictorSets[codeIdx]
                 )
                 let codeValue = codeToken[0].item(Int32.self)
                 codeTokens.append(codeValue)
-                generatedCodePredictorTokens[codeIdx].append(codeValue)
+                generatedCodePredictorSets[codeIdx].insert(codeValue)
             }
 
-            if step < 3 { print("DEBUG [generateCodes]: step \(step) codeTokens=\(codeTokens.count) values=\(codeTokens.prefix(4))") }
+            if debugGen && step < 3 { print("DEBUG [generateCodes]: step \(step) codeTokens=\(codeTokens.count) values=\(codeTokens.prefix(4))") }
             generatedCodes.append(codeTokens)
             generatedCode0Tokens.append(code0Value)
+            generatedCode0TokensSet.insert(code0Value)
             codePredictorCache = nil
-
-            if (step + 1) % 10 == 0 {
-                Memory.clearCache()
-            }
 
             let textEmbed: MLXArray
             if trailingIdx < trailingTextHidden.shape[1] {
@@ -548,14 +538,8 @@ nonisolated public class Qwen3Talker: Module {
 
             var codecEmbedSum = codec_embedding(nextTokenArray)
             for i in 0..<(numCodeGroups - 1) {
-                guard i + 1 < codeTokens.count else {
-                    print("CRASH AVOIDED [generateCodes embed]: i+1=\(i+1) >= codeTokens.count=\(codeTokens.count)")
-                    break
-                }
-                guard i < code_predictor.codec_embedding.count else {
-                    print("CRASH AVOIDED [generateCodes embed]: i=\(i) >= codec_embedding.count=\(code_predictor.codec_embedding.count)")
-                    break
-                }
+                guard i + 1 < codeTokens.count else { break }
+                guard i < code_predictor.codec_embedding.count else { break }
                 let codeVal = MLXArray([codeTokens[i + 1]]).expandedDimensions(axis: 0)
                 codecEmbedSum = codecEmbedSum + code_predictor.codec_embedding[i](codeVal)
             }
@@ -651,6 +635,8 @@ nonisolated public class Qwen3Talker: Module {
         text: String,
         instruct: String? = nil,
         speakerEmbedding: MLXArray? = nil,
+        referenceTranscript: String? = nil,
+        referenceAudioCodes: [[Int32]]? = nil,
         tokenizer: Qwen3Tokenizer,
         temperature: Float = 0.9,
         maxTokens: Int = 1200,
@@ -658,6 +644,8 @@ nonisolated public class Qwen3Talker: Module {
     ) -> AsyncThrowingStream<[[Int32]], Error> {
         let model = self
         let config = self.config
+
+        let useICL = referenceAudioCodes != nil && referenceTranscript != nil && !referenceTranscript!.isEmpty
 
         return AsyncThrowingStream<[[Int32]], Error> { (continuation: AsyncThrowingStream<[[Int32]], Error>.Continuation) in
             Task {
@@ -714,6 +702,20 @@ nonisolated public class Qwen3Talker: Module {
                     let instructIdsArray: [Int32] = tokenizer.encode(text: formatted)
                     let instructIds = MLXArray(instructIdsArray).expandedDimensions(axis: 0)
                     instructEmbed = model.text_projection(model.text_embedding(instructIds))
+                } else if useICL, let refCodes = referenceAudioCodes, let refTranscript = referenceTranscript {
+                    // In-context learning: prepend reference transcript + reference audio semantic codes
+                    let refText = "<|im_start|>user\n\(refTranscript)<|im_end|>\n"
+                    let refTextIds: [Int32] = tokenizer.encode(text: refText)
+                    let refTextEmbed = model.text_projection(model.text_embedding(MLXArray(refTextIds).expandedDimensions(axis: 0)))
+
+                    let numFrames = refCodes.first?.count ?? 0
+                    if numFrames > 0 && !refCodes.isEmpty {
+                        let semanticCodes = MLXArray(refCodes[0]).expandedDimensions(axis: 0)
+                        let refAudioEmbed = model.codec_embedding(semanticCodes)
+                        instructEmbed = concatenated([refTextEmbed, refAudioEmbed], axis: 1)
+                    } else {
+                        instructEmbed = refTextEmbed
+                    }
                 } else if !prompt.isEmpty && speakerId == nil && speakerEmbedding == nil {
                     // Backward compat: treat prompt as instruct when no speaker resolved
                     let formatted = "<|im_start|>user\n\(prompt)<|im_end|>\n"
@@ -754,6 +756,15 @@ nonisolated public class Qwen3Talker: Module {
                 var logits = model.codec_head(h)
 
                 var generatedCode0Tokens: [Int32] = []
+                var generatedCode0TokensSet: Set<Int32> = []
+
+                // Pre-compute EOS/pad mask once — vocabSize is constant across steps
+                let streamVocabSize = logits.shape.last!
+                var streamEosMaskValues = [Float](repeating: 0.0, count: streamVocabSize)
+                if Int(eosTokenId) < streamVocabSize { streamEosMaskValues[Int(eosTokenId)] = -Float.infinity }
+                if Int(padTokenId) < streamVocabSize { streamEosMaskValues[Int(padTokenId)] = -Float.infinity }
+                let streamEosMaskArray = MLXArray(streamEosMaskValues).expandedDimensions(axis: 0)
+
                 let totalTextTokens = trailingTextHidden.shape[1]
 
                 for step in 0..<maxTokens {
@@ -765,20 +776,13 @@ nonisolated public class Qwen3Talker: Module {
 
                     var samplingLogits = logits
                     if hasRemainingText {
-                        let vocabSize = logits.shape.last!
-                        if vocabSize > Int(eosTokenId) {
-                            var maskValues = [Float](repeating: 0.0, count: vocabSize)
-                            maskValues[Int(eosTokenId)] = -Float.infinity
-                            maskValues[Int(padTokenId)] = -Float.infinity
-                            let maskArray = MLXArray(maskValues).expandedDimensions(axis: 0)
-                            samplingLogits = logits + maskArray
-                        }
+                        samplingLogits = logits + streamEosMaskArray
                     }
 
                     let nextToken = model.sampleToken(
                         logits: samplingLogits,
                         temperature: temperature,
-                        generatedTokens: generatedCode0Tokens.isEmpty ? nil : generatedCode0Tokens
+                        generatedTokenSet: generatedCode0TokensSet.isEmpty ? nil : generatedCode0TokensSet
                     )
                     let code0Value = nextToken[0].item(Int32.self)
 
@@ -805,14 +809,8 @@ nonisolated public class Qwen3Talker: Module {
                             let code0Embed = model.codec_embedding(nextTokenArray)
                             codeInput = concatenated([codeHidden, code0Embed], axis: 1)
                         } else {
-                            guard codeIdx < codeTokens.count else {
-                                print("CRASH AVOIDED [streaming]: codeIdx=\(codeIdx) >= codeTokens.count=\(codeTokens.count)")
-                                break
-                            }
-                            guard codeIdx - 1 < model.code_predictor.codec_embedding.count else {
-                                print("CRASH AVOIDED [streaming]: codeIdx-1=\(codeIdx-1) >= codec_embedding.count=\(model.code_predictor.codec_embedding.count)")
-                                break
-                            }
+                            guard codeIdx < codeTokens.count else { break }
+                            guard codeIdx - 1 < model.code_predictor.codec_embedding.count else { break }
                             let prevCode = MLXArray([codeTokens[codeIdx]]).expandedDimensions(axis: 0)
                             codeInput = model.code_predictor.codec_embedding[codeIdx - 1](prevCode)
                         }
@@ -827,10 +825,8 @@ nonisolated public class Qwen3Talker: Module {
 
                     chunkCodes.append(codeTokens)
                     generatedCode0Tokens.append(code0Value)
+                    generatedCode0TokensSet.insert(code0Value)
                     codePredictorCache = nil
-                    if (step + 1) % 10 == 0 {
-                        Memory.clearCache()
-                    }
 
                     if chunkCodes.count >= chunkSize {
                         continuation.yield(chunkCodes)
@@ -848,14 +844,8 @@ nonisolated public class Qwen3Talker: Module {
 
                     var codecEmbedSum = model.codec_embedding(nextTokenArray)
                     for i in 0..<(numCodeGroups - 1) {
-                        guard i + 1 < codeTokens.count else {
-                            print("CRASH AVOIDED [streaming embed]: i+1=\(i+1) >= codeTokens.count=\(codeTokens.count)")
-                            break
-                        }
-                        guard i < model.code_predictor.codec_embedding.count else {
-                            print("CRASH AVOIDED [streaming embed]: i=\(i) >= codec_embedding.count=\(model.code_predictor.codec_embedding.count)")
-                            break
-                        }
+                        guard i + 1 < codeTokens.count else { break }
+                        guard i < model.code_predictor.codec_embedding.count else { break }
                         let codeVal = MLXArray([codeTokens[i + 1]]).expandedDimensions(axis: 0)
                         codecEmbedSum = codecEmbedSum + model.code_predictor.codec_embedding[i](codeVal)
                     }
