@@ -333,13 +333,19 @@ nonisolated public class Qwen3Talker: Module {
         referenceAudioCodes: [[Int32]]? = nil,
         tokenizer: Qwen3Tokenizer,
         temperature: Float = 0.9,
+        detailTemperature: Float? = nil,
+        code0TopK: Int = 80,
+        code0RepetitionPenalty: Float = 1.15,
         maxTokens: Int = 1200
     ) -> [[Int32]] {
+        // Detail codes (1-15) use lower temperature for acoustic fidelity;
+        // code0 (semantic/prosodic) keeps the user-specified temperature for natural variation.
+        let resolvedDetailTemp = detailTemperature ?? max(0.3, temperature * 0.65)
         let useICL = referenceAudioCodes != nil && referenceTranscript != nil && !referenceTranscript!.isEmpty
         let speakerName = prompt.lowercased()
         let speakerId = config.spk_id[speakerName]
         let debugGenEntry = ProcessInfo.processInfo.environment["DUPER_DEBUG_GENERATION"] == "1"
-        if debugGenEntry { print("DEBUG [generateCodes]: entry prompt='\(prompt.prefix(30))' text='\(text.prefix(30))' speakerId=\(speakerId as Any) spkEmbed=\(speakerEmbedding?.shape ?? []) useICL=\(useICL)"); fflush(stdout) }
+        if debugGenEntry { print("DEBUG [generateCodes]: entry prompt='\(prompt.prefix(30))' text='\(text.prefix(30))' speakerId=\(speakerId as Any) spkEmbed=\(speakerEmbedding?.shape ?? []) useICL=\(useICL) temp=\(temperature) detailTemp=\(resolvedDetailTemp) code0TopK=\(code0TopK) code0RepPen=\(code0RepetitionPenalty)"); fflush(stdout) }
 
         let chatText = "<|im_start|>assistant\n\(text)<|im_end|>\n<|im_start|>assistant\n"
         let inputIds = tokenizer.encode(text: chatText).asType(.int32)
@@ -477,6 +483,8 @@ nonisolated public class Qwen3Talker: Module {
             let nextToken = sampleToken(
                 logits: samplingLogits,
                 temperature: temperature,
+                topK: code0TopK,
+                repetitionPenalty: code0RepetitionPenalty,
                 generatedTokenSet: generatedCode0TokensSet.isEmpty ? nil : generatedCode0TokensSet
             )
             let code0Value = nextToken[0].item(Int32.self)
@@ -514,7 +522,7 @@ nonisolated public class Qwen3Talker: Module {
 
                 let codeToken = sampleToken(
                     logits: codeLogits,
-                    temperature: temperature,
+                    temperature: resolvedDetailTemp,
                     generatedTokenSet: generatedCodePredictorSets[codeIdx].isEmpty ? nil : generatedCodePredictorSets[codeIdx]
                 )
                 let codeValue = codeToken[0].item(Int32.self)
@@ -586,6 +594,9 @@ nonisolated public class Qwen3Talker: Module {
         tokenizer: Qwen3Tokenizer,
         decoder: AudioDecoder,
         temperature: Float = 0.9,
+        detailTemperature: Float? = nil,
+        code0TopK: Int = 80,
+        code0RepetitionPenalty: Float = 1.15,
         maxTokens: Int = 1200
     ) -> [Float] {
         let generatedCodes = generateCodes(
@@ -596,6 +607,9 @@ nonisolated public class Qwen3Talker: Module {
             referenceTranscript: referenceTranscript,
             tokenizer: tokenizer,
             temperature: temperature,
+            detailTemperature: detailTemperature,
+            code0TopK: code0TopK,
+            code0RepetitionPenalty: code0RepetitionPenalty,
             maxTokens: maxTokens
         )
 
@@ -639,11 +653,15 @@ nonisolated public class Qwen3Talker: Module {
         referenceAudioCodes: [[Int32]]? = nil,
         tokenizer: Qwen3Tokenizer,
         temperature: Float = 0.9,
+        detailTemperature: Float? = nil,
+        code0TopK: Int = 80,
+        code0RepetitionPenalty: Float = 1.15,
         maxTokens: Int = 1200,
         chunkSize: Int = 12
     ) -> AsyncThrowingStream<[[Int32]], Error> {
         let model = self
         let config = self.config
+        let resolvedDetailTemp = detailTemperature ?? max(0.3, temperature * 0.65)
 
         let useICL = referenceAudioCodes != nil && referenceTranscript != nil && !referenceTranscript!.isEmpty
 
@@ -782,6 +800,8 @@ nonisolated public class Qwen3Talker: Module {
                     let nextToken = model.sampleToken(
                         logits: samplingLogits,
                         temperature: temperature,
+                        topK: code0TopK,
+                        repetitionPenalty: code0RepetitionPenalty,
                         generatedTokenSet: generatedCode0TokensSet.isEmpty ? nil : generatedCode0TokensSet
                     )
                     let code0Value = nextToken[0].item(Int32.self)
@@ -818,7 +838,7 @@ nonisolated public class Qwen3Talker: Module {
                         let (codeLogits, newCodeCache) = model.code_predictor(codeInput, cache: codePredictorCache, generationStep: codeIdx)
                         codePredictorCache = newCodeCache
 
-                        let codeToken = model.sampleToken(logits: codeLogits, temperature: temperature)
+                        let codeToken = model.sampleToken(logits: codeLogits, temperature: resolvedDetailTemp)
                         let codeValue = codeToken[0].item(Int32.self)
                         codeTokens.append(codeValue)
                     }
