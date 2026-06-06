@@ -4,11 +4,16 @@ import Foundation
 /// Finds natural break points to split text while maintaining prosody.
 public struct TextChunker {
 
-    /// Default maximum words per chunk
-    public static let defaultMaxWords = 35
+    /// Default maximum words per chunk.
+    public static let defaultMaxWords = 45
 
-    /// Minimum words to consider for a chunk (avoid tiny fragments)
-    public static let minWords = 8
+    /// Default minimum words to consider for a chunk (avoid tiny fragments).
+    public static let defaultMinWords = 8
+
+    /// Deprecated alias for ``defaultMinWords``, kept so external consumers that
+    /// referenced the old name keep compiling.
+    @available(*, deprecated, renamed: "defaultMinWords")
+    public static let minWords = defaultMinWords
 
     /// Conjunctions that indicate clause boundaries (split BEFORE these)
     private static let conjunctions = [
@@ -26,9 +31,10 @@ public struct TextChunker {
     /// Split text into natural chunks for TTS generation.
     /// - Parameters:
     ///   - text: The input text to chunk
-    ///   - maxWords: Maximum words per chunk (default 35)
+    ///   - maxWords: Maximum words per chunk
+    ///   - minWords: Minimum words for a chunk to avoid tiny fragments
     /// - Returns: Array of text chunks
-    public static func chunk(_ text: String, maxWords: Int = defaultMaxWords) -> [String] {
+    public static func chunk(_ text: String, maxWords: Int = defaultMaxWords, minWords: Int = defaultMinWords) -> [String] {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
 
@@ -42,7 +48,7 @@ public struct TextChunker {
         var remaining = trimmed
 
         while !remaining.isEmpty {
-            let chunk = findNaturalBreak(remaining, maxWords: maxWords)
+            let chunk = findNaturalBreak(remaining, maxWords: maxWords, minWords: minWords)
             let trimmedChunk = chunk.trimmingCharacters(in: .whitespacesAndNewlines)
 
             if !trimmedChunk.isEmpty {
@@ -58,7 +64,7 @@ public struct TextChunker {
     }
 
     /// Find a natural break point within the text.
-    private static func findNaturalBreak(_ text: String, maxWords: Int) -> String {
+    private static func findNaturalBreak(_ text: String, maxWords: Int, minWords: Int = defaultMinWords) -> String {
         let words = text.split(separator: " ", omittingEmptySubsequences: true)
 
         // If text is short enough, return all of it
@@ -71,7 +77,7 @@ public struct TextChunker {
         let window = windowWords.joined(separator: " ")
 
         // Priority 1: Sentence endings (. ! ?)
-        if let breakPoint = findSentenceEnd(in: window) {
+        if let breakPoint = findSentenceEnd(in: window, minWords: minWords) {
             let chunk = String(window.prefix(breakPoint))
             if chunk.split(separator: " ").count >= minWords {
                 return chunk
@@ -126,7 +132,7 @@ public struct TextChunker {
 
     /// Find sentence ending position in text.
     /// Returns the position after the sentence-ending punctuation.
-    private static func findSentenceEnd(in text: String) -> Int? {
+    private static func findSentenceEnd(in text: String, minWords: Int = defaultMinWords) -> Int? {
         var lastEnd: Int? = nil
         let minChunkLength = minWords * 4  // Rough character estimate
 

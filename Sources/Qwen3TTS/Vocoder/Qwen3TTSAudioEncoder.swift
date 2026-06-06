@@ -335,28 +335,6 @@ nonisolated public class EncoderTransformer: Module {
     }
 }
 
-// MARK: - Encoder Downsample
-
-nonisolated public class EncoderDownsample: Module {
-    let conv: MimiConv1d
-
-    public init(config: Qwen3TTSTokenizerEncoderConfig) {
-        // Conv1d(512→512, kernel=2*compress, stride=compress) for 2× temporal compression
-        self.conv = MimiConv1d(
-            inChannels: config.hidden_size,
-            outChannels: config.hidden_size,
-            kernelSize: 2 * config.compress,
-            stride: config.compress
-        )
-        super.init()
-    }
-
-    /// Input: [B, C, T] -> Output: [B, C, T/compress]
-    public func callAsFunction(_ x: MLXArray) -> MLXArray {
-        conv(x)
-    }
-}
-
 // MARK: - Encoder Vector Quantization
 
 nonisolated public class EncoderVectorQuantization: Module {
@@ -463,7 +441,7 @@ nonisolated public class EncoderSplitResidualVectorQuantizer: Module {
 nonisolated public class Qwen3TTSAudioEncoder: Module {
     private var encoder: MimiSEANetEncoder?
     private var encoderTransformer: EncoderTransformer?
-    private var downsample: EncoderDownsample?
+    private var downsample: MimiConv1d?
     private var quantizer: EncoderSplitResidualVectorQuantizer?
     private var validNumQuantizers: Int = 16
 
@@ -489,7 +467,12 @@ nonisolated public class Qwen3TTSAudioEncoder: Module {
         // Create modules
         let enc = MimiSEANetEncoder(config: encoderConfig)
         let transformer = EncoderTransformer(config: encoderConfig)
-        let ds = EncoderDownsample(config: encoderConfig)
+        let ds = MimiConv1d(
+            inChannels: encoderConfig.hidden_size,
+            outChannels: encoderConfig.hidden_size,
+            kernelSize: 2 * encoderConfig.compress,
+            stride: encoderConfig.compress
+        )
         let quant = EncoderSplitResidualVectorQuantizer(config: encoderConfig)
 
         // Evaluate random init weights first
@@ -503,14 +486,48 @@ nonisolated public class Qwen3TTSAudioEncoder: Module {
         let allWeights = try MLX.loadArrays(url: weightsURL, stream: .cpu)
         let sanitized = Qwen3TTSAudioEncoder.sanitizeEncoderWeights(allWeights)
 
-        // Load into a container module that holds all submodules
+        // Load weights into each submodule individually.
+        // Optional Module properties aren't traversable via self.update(),
+        // so we partition the sanitized keys by prefix and load each module directly.
+        func partitionWeights(prefix: String) -> [String: MLXArray] {
+            var result: [String: MLXArray] = [:]
+            let dotPrefix = prefix + "."
+            for (key, value) in sanitized {
+                if key.hasPrefix(dotPrefix) {
+                    result[String(key.dropFirst(dotPrefix.count))] = value
+                }
+            }
+            return result
+        }
+
+        let encWeights = partitionWeights(prefix: "encoder")
+        if !encWeights.isEmpty {
+            let params = ModuleParameters.unflattened(encWeights)
+            try enc.update(parameters: params, verify: .noUnusedKeys)
+        }
+
+        let tfWeights = partitionWeights(prefix: "encoderTransformer")
+        if !tfWeights.isEmpty {
+            let params = ModuleParameters.unflattened(tfWeights)
+            try transformer.update(parameters: params, verify: .noUnusedKeys)
+        }
+
+        let dsWeights = partitionWeights(prefix: "downsample")
+        if !dsWeights.isEmpty {
+            let params = ModuleParameters.unflattened(dsWeights)
+            try ds.update(parameters: params, verify: .noUnusedKeys)
+        }
+
+        let quantWeights = partitionWeights(prefix: "quantizer")
+        if !quantWeights.isEmpty {
+            let params = ModuleParameters.unflattened(quantWeights)
+            try quant.update(parameters: params, verify: .noUnusedKeys)
+        }
+
         self.encoder = enc
         self.encoderTransformer = transformer
         self.downsample = ds
         self.quantizer = quant
-
-        let parameters = ModuleParameters.unflattened(sanitized)
-        try self.update(parameters: parameters, verify: .noUnusedKeys)
 
         Memory.clearCache()
     }
@@ -588,9 +605,34 @@ nonisolated public class Qwen3TTSAudioEncoder: Module {
 
             let workingKey = String(key.dropFirst("encoder.".count))
 
-            // Handle codebook data (cluster_usage + embedding_sum -> embed.weight)
-            if workingKey.contains("_codebook.cluster_usage") || workingKey.contains("_codebook.embedding_sum") {
+            // Skip codebook.initialized flags
+            if workingKey.hasSuffix(".codebook.initialized") {
+                continue
+            }
+
+            // Handle codebook data: encoder uses ".codebook.{cluster_usage,embed_sum}",
+            // decoder uses "._codebook.{cluster_usage,embedding_sum}". Support both formats.
+            let isDecoderFormat = workingKey.contains("._codebook.cluster_usage") || workingKey.contains("._codebook.embedding_sum")
+            let isEncoderFormat = !isDecoderFormat && (workingKey.hasSuffix(".codebook.cluster_usage") || workingKey.hasSuffix(".codebook.embed_sum"))
+
+            if isDecoderFormat {
                 let parts = workingKey.components(separatedBy: "._codebook.")
+                if parts.count == 2 {
+                    let basePath = parts[0]
+                    if codebookData[basePath] == nil {
+                        codebookData[basePath] = [:]
+                    }
+                    if workingKey.contains("cluster_usage") {
+                        codebookData[basePath]?["cluster_usage"] = v
+                    } else {
+                        codebookData[basePath]?["embedding_sum"] = v
+                    }
+                }
+                continue
+            }
+
+            if isEncoderFormat {
+                let parts = workingKey.components(separatedBy: ".codebook.")
                 if parts.count == 2 {
                     let basePath = parts[0]
                     if codebookData[basePath] == nil {
@@ -624,7 +666,7 @@ nonisolated public class Qwen3TTSAudioEncoder: Module {
             sanitized[newKey] = v
         }
 
-        // Compute codebook embeddings from cluster_usage + embedding_sum
+        // Compute codebook embeddings from cluster_usage + embedding_sum/embed_sum
         let eps: Float = 1e-5
         for (basePath, data) in codebookData {
             if let clusterUsage = data["cluster_usage"],

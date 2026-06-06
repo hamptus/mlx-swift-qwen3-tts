@@ -179,6 +179,7 @@ nonisolated public class Qwen3Talker: Module {
             try self.update(parameters: params, verify: .none)
 
             // Manually load code predictor weights (arrays need explicit handling)
+            @discardableResult
             func loadQuantizedLinear(_ module: Linear, prefix: String) throws -> Bool {
                 guard let w = newWeights["\(prefix).weight"] else { return false }
                 var params: [String: MLXArray] = ["weight": w]
@@ -323,6 +324,25 @@ nonisolated public class Qwen3Talker: Module {
 
     // MARK: - Generation
 
+    /// True when every codebook row has the same non-zero length. The ICL paths
+    /// index `refCodes[q][t]` and sum per-codebook `MLXArray`s, so a jagged array
+    /// would trap on index-out-of-range or abort on an MLX broadcast mismatch.
+    public static func referenceCodesAreRectangular(_ codes: [[Int32]]) -> Bool {
+        guard let width = codes.first?.count, width > 0 else { return false }
+        return codes.allSatisfy { $0.count == width }
+    }
+
+    /// True when the inputs constitute a valid ICL voice-cloning request: a
+    /// non-empty reference transcript plus rectangular reference audio codes with
+    /// at least one frame. Mirrors the guard on the ICL prefill branch so the
+    /// repetition-penalty floor and KV-cache trimming policy never diverge from
+    /// the path that actually runs.
+    public static func isICLInput(referenceAudioCodes: [[Int32]]?, referenceTranscript: String?) -> Bool {
+        guard let transcript = referenceTranscript, !transcript.isEmpty else { return false }
+        guard let refCodes = referenceAudioCodes, referenceCodesAreRectangular(refCodes) else { return false }
+        return true
+    }
+
     /// Generate audio codes without decoding (for batch decoding later).
     public func generateCodes(
         prompt: String,
@@ -336,25 +356,41 @@ nonisolated public class Qwen3Talker: Module {
         detailTemperature: Float? = nil,
         code0TopK: Int = 80,
         code0RepetitionPenalty: Float = 1.15,
-        maxTokens: Int = 1200
+        maxTokens: Int = 1200,
+        iclMaxTokensCeiling: Int? = nil,
+        iclTokensPerTextToken: Int? = nil
     ) -> [[Int32]] {
         // Detail codes (1-15) use lower temperature for acoustic fidelity;
         // code0 (semantic/prosodic) keeps the user-specified temperature for natural variation.
         let resolvedDetailTemp = detailTemperature ?? max(0.3, temperature * 0.65)
-        let useICL = referenceAudioCodes != nil && referenceTranscript != nil && !referenceTranscript!.isEmpty
+        // useICL must match the conditions of the ICL prefill branch below exactly.
+        // A non-nil-but-empty (or zero-frame) referenceAudioCodes is NOT ICL: it must
+        // not floor the repetition penalty or disable KV-cache trimming for what is
+        // really a normal generation.
+        let useICL = Qwen3Talker.isICLInput(referenceAudioCodes: referenceAudioCodes, referenceTranscript: referenceTranscript)
         let speakerName = prompt.lowercased()
         let speakerId = config.spk_id[speakerName]
         let debugGenEntry = ProcessInfo.processInfo.environment["DUPER_DEBUG_GENERATION"] == "1"
         if debugGenEntry { print("DEBUG [generateCodes]: entry prompt='\(prompt.prefix(30))' text='\(text.prefix(30))' speakerId=\(speakerId as Any) spkEmbed=\(speakerEmbedding?.shape ?? []) useICL=\(useICL) temp=\(temperature) detailTemp=\(resolvedDetailTemp) code0TopK=\(code0TopK) code0RepPen=\(code0RepetitionPenalty)"); fflush(stdout) }
 
         let chatText = "<|im_start|>assistant\n\(text)<|im_end|>\n<|im_start|>assistant\n"
-        let inputIds = tokenizer.encode(text: chatText).asType(.int32)
+        let chatIdsRaw: [Int32] = tokenizer.encode(text: chatText)
+        let inputIds = MLXArray(chatIdsRaw).expandedDimensions(axis: 0)
         if debugGenEntry { print("DEBUG [generateCodes]: inputIds shape=\(inputIds.shape)"); fflush(stdout) }
 
         let minTokens = 9
         guard inputIds.shape[1] >= minTokens else {
             if debugGenEntry { print("DEBUG [generateCodes]: input too short (\(inputIds.shape[1]) < \(minTokens))") }
             return []
+        }
+
+        // When ICL sizing hints are supplied, derive the per-call token cap from the
+        // already-tokenized input instead of having the caller tokenize a second time.
+        let resolvedMaxTokens: Int
+        if let ceiling = iclMaxTokensCeiling, let perToken = iclTokensPerTextToken {
+            resolvedMaxTokens = min(ceiling, max(75, inputIds.shape[1] * perToken))
+        } else {
+            resolvedMaxTokens = maxTokens
         }
 
         let ttsTokens = MLXArray([Int32(config.tts_bos_token_id), Int32(config.tts_eos_token_id), Int32(config.tts_pad_token_id)]).expandedDimensions(axis: 0)
@@ -391,55 +427,103 @@ nonisolated public class Qwen3Talker: Module {
         var combinedEmbed = concatenated([padEmbeds, ttsBosEmbed], axis: 1)
         combinedEmbed = combinedEmbed + codecEmbed[0..., 0..<(codecEmbed.shape[1]-1), 0...]
 
-        var instructEmbed: MLXArray? = nil
-        if let instructText = instruct, !instructText.isEmpty {
-            // Explicit instruct text (VoiceDesign or CustomVoice mode)
-            let formatted = "<|im_start|>user\n\(instructText)<|im_end|>\n"
-            let instructIdsArray: [Int32] = tokenizer.encode(text: formatted)
-            let instructIds = MLXArray(instructIdsArray).expandedDimensions(axis: 0)
-            instructEmbed = text_projection(text_embedding(instructIds))
-        } else if useICL, let refCodes = referenceAudioCodes, let refTranscript = referenceTranscript {
-            let refText = "<|im_start|>user\n\(refTranscript)<|im_end|>\n"
-            let refTextIds: [Int32] = tokenizer.encode(text: refText)
-            let refTextEmbed = text_projection(text_embedding(MLXArray(refTextIds).expandedDimensions(axis: 0)))
-
-            let numFrames = refCodes.first?.count ?? 0
-            if numFrames > 0 && !refCodes.isEmpty {
-                let semanticCodes = MLXArray(refCodes[0]).expandedDimensions(axis: 0)
-                let refAudioEmbed = codec_embedding(semanticCodes)
-                instructEmbed = concatenated([refTextEmbed, refAudioEmbed], axis: 1)
-            } else {
-                instructEmbed = refTextEmbed
-            }
-        } else if !prompt.isEmpty && speakerId == nil && speakerEmbedding == nil {
-            // Backward compat: treat prompt as instruct when no speaker resolved
-            let formatted = "<|im_start|>user\n\(prompt)<|im_end|>\n"
-            let instructIdsArray: [Int32] = tokenizer.encode(text: formatted)
-            let instructIds = MLXArray(instructIdsArray).expandedDimensions(axis: 0)
-            instructEmbed = text_projection(text_embedding(instructIds))
-        }
+        let numCodeGroups = config.code_predictor_config.num_code_groups
+        let effectiveRepPenalty = useICL ? max(code0RepetitionPenalty, 1.5) : code0RepetitionPenalty
 
         var inputEmbeds: MLXArray
-        if let instructEmbedding = instructEmbed {
-            inputEmbeds = concatenated([instructEmbedding, roleEmbed, combinedEmbed], axis: 1)
-        } else {
-            inputEmbeds = concatenated([roleEmbed, combinedEmbed], axis: 1)
-        }
-
-        let firstTextEmbed = text_projection(text_embedding(inputIds[0..., 3..<4])) + codecEmbed[0..., (codecEmbed.shape[1]-1)..., 0...]
-        inputEmbeds = concatenated([inputEmbeds, firstTextEmbed], axis: 1)
-
-        let trailingLen = inputIds.shape[1] - 4 - 5
         var trailingTextHidden: MLXArray
-        if trailingLen > 0 {
-            trailingTextHidden = text_projection(text_embedding(inputIds[0..., 4..<(inputIds.shape[1]-5)]))
-            trailingTextHidden = concatenated([trailingTextHidden, ttsEosEmbed], axis: 1)
+
+        if useICL, let refCodes = referenceAudioCodes, let refTranscript = referenceTranscript, !refCodes.isEmpty, let refTime = refCodes.first?.count, refTime > 0 {
+            // ICL voice cloning: all text (ref + target) goes in prefill with proper
+            // codec_pad/tts_pad overlays. During generation, trailing_text_hidden is
+            // just tts_pad. Matches mlx-audio's _prepare_icl_generation_inputs
+            // non-streaming layout.
+
+            // Tokenize reference text with assistant role (NOT user)
+            let refChat = "<|im_start|>assistant\n\(refTranscript)<|im_end|>\n"
+            let refIdsArray: [Int32] = tokenizer.encode(text: refChat)
+            guard refIdsArray.count > 5 else { return [] }
+            let refTextIds = Array(refIdsArray[3..<(refIdsArray.count - 2)])
+
+            // Pure target text tokens (skip role prefix [:3] and trailing template [-5:])
+            guard chatIdsRaw.count > 8 else { return [] }
+            let targetTextIds = Array(chatIdsRaw[3..<(chatIdsRaw.count - 5)])
+
+            // Combine ref + target text, project through text embeddings, append tts_eos
+            let combinedTextIds = refTextIds + targetTextIds
+            let combinedTextArray = MLXArray(combinedTextIds).expandedDimensions(axis: 0)
+            var iclTextEmbed = text_projection(text_embedding(combinedTextArray))
+            iclTextEmbed = concatenated([iclTextEmbed, ttsEosEmbed], axis: 1)
+            let textLens = iclTextEmbed.shape[1]
+
+            // Sum embeddings from ALL codebook groups (RVQ is additive)
+            // First group via main codec_embedding, groups 1..N-1 via code_predictor
+            let firstCbCodes = MLXArray(refCodes[0]).expandedDimensions(axis: 0)
+            var refCodecEmbed = codec_embedding(firstCbCodes)
+            for i in 0..<(numCodeGroups - 1) {
+                guard i + 1 < refCodes.count else { break }
+                guard i < code_predictor.codec_embedding.count else { break }
+                let cbCodes = MLXArray(refCodes[i + 1]).expandedDimensions(axis: 0)
+                refCodecEmbed = refCodecEmbed + code_predictor.codec_embedding[i](cbCodes)
+            }
+
+            // Prepend codec_bos to the summed ref codes
+            let codecBosEmbed = codec_embedding(MLXArray([Int32(config.codec_bos_id)]).expandedDimensions(axis: 0))
+            let codecEmbedIcl = concatenated([codecBosEmbed, refCodecEmbed], axis: 1)
+            let codecLens = codecEmbedIcl.shape[1]
+
+            // Non-streaming overlay: text positions get codec_pad, codec positions get tts_pad
+            let codecPadEmbed = codec_embedding(MLXArray([Int32(config.codec_pad_id)]).expandedDimensions(axis: 0))
+            let textWithCodecPad = iclTextEmbed + tiled(codecPadEmbed, repetitions: [1, textLens, 1])
+            let codecWithTtsPad = codecEmbedIcl + tiled(ttsPadEmbed, repetitions: [1, codecLens, 1])
+            let iclInputEmbed = concatenated([textWithCodecPad, codecWithTtsPad], axis: 1)
+
+            // Full input: role + combined_prefix + ICL block
+            inputEmbeds = concatenated([roleEmbed, combinedEmbed, iclInputEmbed], axis: 1)
+
+            // All text consumed in prefill; generation only gets tts_pad
+            trailingTextHidden = ttsPadEmbed
+
+            if debugGenEntry {
+                print("DEBUG [generateCodes ICL]: refText=\(refTextIds.count) targetText=\(targetTextIds.count) textLens=\(textLens) codecLens=\(codecLens) refFrames=\(refTime) repPen=\(effectiveRepPenalty)")
+                fflush(stdout)
+            }
         } else {
-            trailingTextHidden = ttsEosEmbed
+            var instructEmbed: MLXArray? = nil
+            if let instructText = instruct, !instructText.isEmpty {
+                // Explicit instruct text (VoiceDesign or CustomVoice mode)
+                let formatted = "<|im_start|>user\n\(instructText)<|im_end|>\n"
+                let instructIdsArray: [Int32] = tokenizer.encode(text: formatted)
+                let instructIds = MLXArray(instructIdsArray).expandedDimensions(axis: 0)
+                instructEmbed = text_projection(text_embedding(instructIds))
+            } else if !prompt.isEmpty && speakerId == nil && speakerEmbedding == nil {
+                // Backward compat: treat prompt as instruct when no speaker resolved
+                let formatted = "<|im_start|>user\n\(prompt)<|im_end|>\n"
+                let instructIdsArray: [Int32] = tokenizer.encode(text: formatted)
+                let instructIds = MLXArray(instructIdsArray).expandedDimensions(axis: 0)
+                instructEmbed = text_projection(text_embedding(instructIds))
+            }
+
+            if let instructEmbedding = instructEmbed {
+                inputEmbeds = concatenated([instructEmbedding, roleEmbed, combinedEmbed], axis: 1)
+            } else {
+                inputEmbeds = concatenated([roleEmbed, combinedEmbed], axis: 1)
+            }
+
+            let firstTextEmbed = text_projection(text_embedding(inputIds[0..., 3..<4])) + codecEmbed[0..., (codecEmbed.shape[1]-1)..., 0...]
+            inputEmbeds = concatenated([inputEmbeds, firstTextEmbed], axis: 1)
+
+            let trailingLen = inputIds.shape[1] - 4 - 5
+            if trailingLen > 0 {
+                trailingTextHidden = text_projection(text_embedding(inputIds[0..., 4..<(inputIds.shape[1]-5)]))
+                trailingTextHidden = concatenated([trailingTextHidden, ttsEosEmbed], axis: 1)
+            } else {
+                trailingTextHidden = ttsEosEmbed
+            }
         }
 
         let debugGen = ProcessInfo.processInfo.environment["DUPER_DEBUG_GENERATION"] == "1"
-        if debugGen { print("DEBUG [generateCodes]: inputEmbeds shape=\(inputEmbeds.shape) trailingLen=\(trailingLen)") }
+        if debugGen { print("DEBUG [generateCodes]: inputEmbeds shape=\(inputEmbeds.shape) trailingShape=\(trailingTextHidden.shape) useICL=\(useICL)") }
         var (h, cache) = self.callAsFunction(inputEmbeds, cache: nil, positionOffset: nil)
         var positionOffset = inputEmbeds.shape[1]
         if debugGen { print("DEBUG [generateCodes]: prefill done, h shape=\(h.shape), positionOffset=\(positionOffset)") }
@@ -449,7 +533,6 @@ nonisolated public class Qwen3Talker: Module {
         let padTokenId: Int32 = Int32(config.codec_pad_id)
         var trailingIdx = 0
         var consecutivePad = 0
-        let numCodeGroups = config.code_predictor_config.num_code_groups
         if debugGen { print("DEBUG [generateCodes]: numCodeGroups=\(numCodeGroups), code_predictor embeddings=\(code_predictor.codec_embedding.count), lm_heads=\(code_predictor.lm_head.count)") }
 
         var logits = codec_head(h)
@@ -467,7 +550,7 @@ nonisolated public class Qwen3Talker: Module {
 
         let totalTextTokens = trailingTextHidden.shape[1]
 
-        for step in 0..<maxTokens {
+        for step in 0..<resolvedMaxTokens {
             if Task.isCancelled { break }
             if debugGen && (step < 3 || step % 50 == 0) {
                 print("DEBUG [generateCodes]: step \(step), logits shape=\(logits.shape), trailingIdx=\(trailingIdx)/\(totalTextTokens)")
@@ -484,7 +567,7 @@ nonisolated public class Qwen3Talker: Module {
                 logits: samplingLogits,
                 temperature: temperature,
                 topK: code0TopK,
-                repetitionPenalty: code0RepetitionPenalty,
+                repetitionPenalty: effectiveRepPenalty,
                 generatedTokenSet: generatedCode0TokensSet.isEmpty ? nil : generatedCode0TokensSet
             )
             let code0Value = nextToken[0].item(Int32.self)
@@ -562,7 +645,18 @@ nonisolated public class Qwen3Talker: Module {
             positionOffset += 1
 
             if (step + 1) % 15 == 0 {
-                cache = trimKVCache(cache, maxWindow: maxKVCacheWindow)
+                // In ICL mode, trimming evicts the reference conditioning from KV cache,
+                // causing the model to lose voice identity after ~15 steps. The Python
+                // mlx-audio implementation does not trim during ICL generation.
+                //
+                // Memory note: with trimming disabled, peak KV memory for an ICL call is
+                // bounded by prefill(ref codes + ref text + target text) + resolvedMaxTokens
+                // rather than maxKVCacheWindow. The pipeline resets the cache per chunk, so
+                // this peak is per-chunk, not cumulative across the whole utterance. A long
+                // reference combined with a raised iclMaxTokensCeiling raises that peak.
+                if !useICL {
+                    cache = trimKVCache(cache, maxWindow: maxKVCacheWindow)
+                }
                 eval(h, logits)
                 Stream.defaultStream(.gpu).synchronize()
                 Memory.clearCache()
@@ -663,7 +757,8 @@ nonisolated public class Qwen3Talker: Module {
         let config = self.config
         let resolvedDetailTemp = detailTemperature ?? max(0.3, temperature * 0.65)
 
-        let useICL = referenceAudioCodes != nil && referenceTranscript != nil && !referenceTranscript!.isEmpty
+        // Match the ICL prefill branch exactly (see isICLInput / generateCodes).
+        let useICL = Qwen3Talker.isICLInput(referenceAudioCodes: referenceAudioCodes, referenceTranscript: referenceTranscript)
 
         return AsyncThrowingStream<[[Int32]], Error> { (continuation: AsyncThrowingStream<[[Int32]], Error>.Continuation) in
             Task {
@@ -671,7 +766,8 @@ nonisolated public class Qwen3Talker: Module {
                 let speakerId = config.spk_id[speakerName]
 
                 let chatText = "<|im_start|>assistant\n\(text)<|im_end|>\n<|im_start|>assistant\n"
-                let inputIds = tokenizer.encode(text: chatText).asType(.int32)
+                let chatIdsRaw: [Int32] = tokenizer.encode(text: chatText)
+                let inputIds = MLXArray(chatIdsRaw).expandedDimensions(axis: 0)
 
                 let minTokens = 9
                 guard inputIds.shape[1] >= minTokens else {
@@ -713,52 +809,90 @@ nonisolated public class Qwen3Talker: Module {
                 var combinedEmbed = concatenated([padEmbeds, ttsBosEmbed], axis: 1)
                 combinedEmbed = combinedEmbed + codecEmbed[0..., 0..<(codecEmbed.shape[1]-1), 0...]
 
-                var instructEmbed: MLXArray? = nil
-                if let instructText = instruct, !instructText.isEmpty {
-                    // Explicit instruct text (VoiceDesign or CustomVoice mode)
-                    let formatted = "<|im_start|>user\n\(instructText)<|im_end|>\n"
-                    let instructIdsArray: [Int32] = tokenizer.encode(text: formatted)
-                    let instructIds = MLXArray(instructIdsArray).expandedDimensions(axis: 0)
-                    instructEmbed = model.text_projection(model.text_embedding(instructIds))
-                } else if useICL, let refCodes = referenceAudioCodes, let refTranscript = referenceTranscript {
-                    // In-context learning: prepend reference transcript + reference audio semantic codes
-                    let refText = "<|im_start|>user\n\(refTranscript)<|im_end|>\n"
-                    let refTextIds: [Int32] = tokenizer.encode(text: refText)
-                    let refTextEmbed = model.text_projection(model.text_embedding(MLXArray(refTextIds).expandedDimensions(axis: 0)))
-
-                    let numFrames = refCodes.first?.count ?? 0
-                    if numFrames > 0 && !refCodes.isEmpty {
-                        let semanticCodes = MLXArray(refCodes[0]).expandedDimensions(axis: 0)
-                        let refAudioEmbed = model.codec_embedding(semanticCodes)
-                        instructEmbed = concatenated([refTextEmbed, refAudioEmbed], axis: 1)
-                    } else {
-                        instructEmbed = refTextEmbed
-                    }
-                } else if !prompt.isEmpty && speakerId == nil && speakerEmbedding == nil {
-                    // Backward compat: treat prompt as instruct when no speaker resolved
-                    let formatted = "<|im_start|>user\n\(prompt)<|im_end|>\n"
-                    let instructIdsArray: [Int32] = tokenizer.encode(text: formatted)
-                    let instructIds = MLXArray(instructIdsArray).expandedDimensions(axis: 0)
-                    instructEmbed = model.text_projection(model.text_embedding(instructIds))
-                }
+                let numCodeGroups = config.code_predictor_config.num_code_groups
+                let effectiveRepPenalty = useICL ? max(code0RepetitionPenalty, 1.5) : code0RepetitionPenalty
 
                 var inputEmbeds: MLXArray
-                if let instructEmbedding = instructEmbed {
-                    inputEmbeds = concatenated([instructEmbedding, roleEmbed, combinedEmbed], axis: 1)
-                } else {
-                    inputEmbeds = concatenated([roleEmbed, combinedEmbed], axis: 1)
-                }
-
-                let firstTextEmbed = model.text_projection(model.text_embedding(inputIds[0..., 3..<4])) + codecEmbed[0..., (codecEmbed.shape[1]-1)..., 0...]
-                inputEmbeds = concatenated([inputEmbeds, firstTextEmbed], axis: 1)
-
-                let trailingLen = inputIds.shape[1] - 4 - 5
                 var trailingTextHidden: MLXArray
-                if trailingLen > 0 {
-                    trailingTextHidden = model.text_projection(model.text_embedding(inputIds[0..., 4..<(inputIds.shape[1]-5)]))
-                    trailingTextHidden = concatenated([trailingTextHidden, ttsEosEmbed], axis: 1)
+
+                if useICL, let refCodes = referenceAudioCodes, let refTranscript = referenceTranscript, !refCodes.isEmpty, let refTime = refCodes.first?.count, refTime > 0 {
+                    // ICL voice cloning: all text (ref + target) goes in prefill with proper
+                    // codec_pad/tts_pad overlays. During generation, trailing_text_hidden is
+                    // just tts_pad. Matches mlx-audio's _prepare_icl_generation_inputs
+                    // non-streaming layout.
+
+                    let refChat = "<|im_start|>assistant\n\(refTranscript)<|im_end|>\n"
+                    let refIdsArray: [Int32] = tokenizer.encode(text: refChat)
+                    guard refIdsArray.count > 5 else {
+                        continuation.finish()
+                        return
+                    }
+                    let refTextIds = Array(refIdsArray[3..<(refIdsArray.count - 2)])
+
+                    guard chatIdsRaw.count > 8 else {
+                        continuation.finish()
+                        return
+                    }
+                    let targetTextIds = Array(chatIdsRaw[3..<(chatIdsRaw.count - 5)])
+
+                    let combinedTextIds = refTextIds + targetTextIds
+                    let combinedTextArray = MLXArray(combinedTextIds).expandedDimensions(axis: 0)
+                    var iclTextEmbed = model.text_projection(model.text_embedding(combinedTextArray))
+                    iclTextEmbed = concatenated([iclTextEmbed, ttsEosEmbed], axis: 1)
+                    let textLens = iclTextEmbed.shape[1]
+
+                    let firstCbCodes = MLXArray(refCodes[0]).expandedDimensions(axis: 0)
+                    var refCodecEmbed = model.codec_embedding(firstCbCodes)
+                    for i in 0..<(numCodeGroups - 1) {
+                        guard i + 1 < refCodes.count else { break }
+                        guard i < model.code_predictor.codec_embedding.count else { break }
+                        let cbCodes = MLXArray(refCodes[i + 1]).expandedDimensions(axis: 0)
+                        refCodecEmbed = refCodecEmbed + model.code_predictor.codec_embedding[i](cbCodes)
+                    }
+
+                    let codecBosEmbed = model.codec_embedding(MLXArray([Int32(config.codec_bos_id)]).expandedDimensions(axis: 0))
+                    let codecEmbedIcl = concatenated([codecBosEmbed, refCodecEmbed], axis: 1)
+                    let codecLens = codecEmbedIcl.shape[1]
+
+                    let codecPadEmbed = model.codec_embedding(MLXArray([Int32(config.codec_pad_id)]).expandedDimensions(axis: 0))
+                    let textWithCodecPad = iclTextEmbed + tiled(codecPadEmbed, repetitions: [1, textLens, 1])
+                    let codecWithTtsPad = codecEmbedIcl + tiled(ttsPadEmbed, repetitions: [1, codecLens, 1])
+                    let iclInputEmbed = concatenated([textWithCodecPad, codecWithTtsPad], axis: 1)
+
+                    inputEmbeds = concatenated([roleEmbed, combinedEmbed, iclInputEmbed], axis: 1)
+                    trailingTextHidden = ttsPadEmbed
                 } else {
-                    trailingTextHidden = ttsEosEmbed
+                    var instructEmbed: MLXArray? = nil
+                    if let instructText = instruct, !instructText.isEmpty {
+                        // Explicit instruct text (VoiceDesign or CustomVoice mode)
+                        let formatted = "<|im_start|>user\n\(instructText)<|im_end|>\n"
+                        let instructIdsArray: [Int32] = tokenizer.encode(text: formatted)
+                        let instructIds = MLXArray(instructIdsArray).expandedDimensions(axis: 0)
+                        instructEmbed = model.text_projection(model.text_embedding(instructIds))
+                    } else if !prompt.isEmpty && speakerId == nil && speakerEmbedding == nil {
+                        // Backward compat: treat prompt as instruct when no speaker resolved
+                        let formatted = "<|im_start|>user\n\(prompt)<|im_end|>\n"
+                        let instructIdsArray: [Int32] = tokenizer.encode(text: formatted)
+                        let instructIds = MLXArray(instructIdsArray).expandedDimensions(axis: 0)
+                        instructEmbed = model.text_projection(model.text_embedding(instructIds))
+                    }
+
+                    if let instructEmbedding = instructEmbed {
+                        inputEmbeds = concatenated([instructEmbedding, roleEmbed, combinedEmbed], axis: 1)
+                    } else {
+                        inputEmbeds = concatenated([roleEmbed, combinedEmbed], axis: 1)
+                    }
+
+                    let firstTextEmbed = model.text_projection(model.text_embedding(inputIds[0..., 3..<4])) + codecEmbed[0..., (codecEmbed.shape[1]-1)..., 0...]
+                    inputEmbeds = concatenated([inputEmbeds, firstTextEmbed], axis: 1)
+
+                    let trailingLen = inputIds.shape[1] - 4 - 5
+                    if trailingLen > 0 {
+                        trailingTextHidden = model.text_projection(model.text_embedding(inputIds[0..., 4..<(inputIds.shape[1]-5)]))
+                        trailingTextHidden = concatenated([trailingTextHidden, ttsEosEmbed], axis: 1)
+                    } else {
+                        trailingTextHidden = ttsEosEmbed
+                    }
                 }
 
                 var (h, cache) = model.callAsFunction(inputEmbeds, cache: nil, positionOffset: nil)
@@ -769,7 +903,6 @@ nonisolated public class Qwen3Talker: Module {
                 let padTokenId: Int32 = Int32(config.codec_pad_id)
                 var trailingIdx = 0
                 var consecutivePad = 0
-                let numCodeGroups = config.code_predictor_config.num_code_groups
 
                 var logits = model.codec_head(h)
 
@@ -801,7 +934,7 @@ nonisolated public class Qwen3Talker: Module {
                         logits: samplingLogits,
                         temperature: temperature,
                         topK: code0TopK,
-                        repetitionPenalty: code0RepetitionPenalty,
+                        repetitionPenalty: effectiveRepPenalty,
                         generatedTokenSet: generatedCode0TokensSet.isEmpty ? nil : generatedCode0TokensSet
                     )
                     let code0Value = nextToken[0].item(Int32.self)
@@ -881,7 +1014,12 @@ nonisolated public class Qwen3Talker: Module {
                     positionOffset += 1
 
                     if (step + 1) % 15 == 0 {
-                        cache = trimKVCache(cache, maxWindow: maxKVCacheWindow)
+                        // ICL prefill is much longer than maxKVCacheWindow; trimming
+                        // evicts the voice conditioning. Match the Python mlx-audio
+                        // streaming path which does not trim.
+                        if !useICL {
+                            cache = trimKVCache(cache, maxWindow: maxKVCacheWindow)
+                        }
                         eval(h, logits)
                         Stream.defaultStream(.gpu).synchronize()
                         Memory.clearCache()
