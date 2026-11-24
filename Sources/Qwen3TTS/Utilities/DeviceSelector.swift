@@ -46,6 +46,6 @@ public enum DeviceSelector {
 
     public static func synchronizeIfNeeded(device: Device) {
         guard device.deviceType == .gpu else { return }
-        Stream.defaultStream(device).synchronize()
+        Stream.defaultStream(.gpu).synchronize()
     }
 }

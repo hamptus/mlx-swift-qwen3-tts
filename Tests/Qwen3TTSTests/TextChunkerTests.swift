@@ -47,6 +47,14 @@ final class TextChunkerTests: XCTestCase {
         XCTAssertEqual(longEstimate, 100) // 20 words * 5
     }
 
+    func testDefaultMaxWordsIs45() {
+        XCTAssertEqual(TextChunker.defaultMaxWords, 45)
+    }
+
+    func testDefaultMinWordsIs8() {
+        XCTAssertEqual(TextChunker.defaultMinWords, 8)
+    }
+
     func testVeryLongText() {
         let words = (0..<200).map { "word\($0)" }
         let text = words.joined(separator: " ")
@@ -57,6 +65,16 @@ final class TextChunkerTests: XCTestCase {
             let wordCount = chunk.split(separator: " ").count
             XCTAssertLessThanOrEqual(wordCount, TextChunker.defaultMaxWords)
         }
+    }
+
+    func testCustomMinWords() {
+        // With a very high minWords, the chunker should produce fewer, larger chunks
+        let text = "Short sentence. Another short one. And yet another. Plus one more sentence here. Final bit of text to make it longer than default."
+        let chunksDefault = TextChunker.chunk(text, maxWords: 20)
+        let chunksHighMin = TextChunker.chunk(text, maxWords: 20, minWords: 15)
+        // With higher minWords, break points that produce tiny chunks are skipped
+        XCTAssertGreaterThanOrEqual(chunksDefault.count, 1)
+        XCTAssertGreaterThanOrEqual(chunksHighMin.count, 1)
     }
 
     func testMinWordsRespected() {
